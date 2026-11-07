@@ -1,0 +1,17 @@
+{
+  "run_dir": "runs/decisions_tiny_cpu",
+  "preset": "tiny",
+  "device": "cpu",
+  "precision": "fp32",
+  "decision_train": "data/decisions/train.jsonl",
+  "decision_val": "data/decisions/val.jsonl",
+  "decision_batch_size": 8,
+  "order_consistency_coef": 0.1,
+  "lr": 0.002,
+  "warmup_steps": 30,
+  "max_steps": 1500,
+  "log_every": 50,
+  "eval_every": 250,
+  "eval_decision_examples": 300,
+  "save_every": 500
+}

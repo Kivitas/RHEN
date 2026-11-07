@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use RHEN in your research or production agent systems, please cite it as below."
+title: "RHEN: Non-Autoregressive JEV-Type Decision Engine for Agentic AI"
+authors:
+  - name: "RHEN Contributors"
+date-released: 2026-11-07
+url: "https://github.com/Kivitas/RHEN"
+repository-code: "https://github.com/Kivitas/RHEN"
+keywords:
+  - "agentic-ai"
+  - "decision-making"
+  - "joint-evaluation"
+  - "conformal-prediction"
+  - "non-autoregressive"
+  - "action-cards"
+  - "deep-learning"
+license: "MIT"
+version: "1.0.0"

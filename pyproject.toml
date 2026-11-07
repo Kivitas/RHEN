@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rhen"
+version = "1.0.0"
+description = "RHEN: Non-Autoregressive JEV-Type Decision Engine for Agentic AI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "RHEN Contributors" }]
+keywords = [
+    "rhen",
+    "jev",
+    "decision-maker",
+    "agentic-ai",
+    "conformal-prediction",
+    "out-of-distribution",
+    "non-autoregressive",
+    "action-cards",
+    "mixture-of-experts",
+    "deep-learning"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.40,<6",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pyflakes>=3.0",
+]
+tracking = [
+    "tensorboard>=2.12",
+    "wandb>=0.16",
+]
+
+[project.scripts]
+rhen-decide = "cli.decide:main"
+rhen-train = "cli.train:main"
+rhen-eval = "cli.eval:main"
+rhen-tasks = "cli.tasks:main"
+rhen-sweep = "eos_research.sweep:main"
+
+[tool.setuptools]
+packages = ["rhen", "rhen.optim", "rhen.research", "optim", "eos_research", "cli"]
+py-modules = [
+    "adapter",
+    "agent_tools",
+    "config",
+    "context_builder",
+    "eos_eval",
+    "eos_loop",
+    "meta_cognitive_monitor",
+    "model",
+    "optimizers",
+    "rhen_chunker",
+    "rhen_cognition",
+    "rhen_credit",
+    "rhen_loss",
+    "rhen_packer",
+    "rhen_pillars",
+    "rhen_verify",
+    "tokenizer",
+    "unified_orchestrator",
+]
+
+[tool.setuptools.package-data]
+rhen = ["py.typed", "tokenizer_assets/*"]
+"*" = ["EOS_Tokenizer/*", "configs/*.json"]
