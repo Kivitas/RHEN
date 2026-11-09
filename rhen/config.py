@@ -33,6 +33,8 @@ historical defaults.
 """
 
 import dataclasses
+import functools
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
@@ -40,6 +42,63 @@ try:
     from transformers import PretrainedConfig
 except ImportError:
     PretrainedConfig = object
+
+
+# ---------------------------------------------------------------------------
+# Removed no-op keys. RHEN 1.0.0 deleted these knobs because no code read them.
+# Configs and saved checkpoints written earlier may still carry them, so every
+# constructor below accepts them, drops them, and emits one DeprecationWarning
+# per call that names the keys. Nothing else about the config changes.
+# ---------------------------------------------------------------------------
+_REMOVED_LEGACY_KEYS = (
+    # RecurrentLoopConfig
+    "enable_symplectic_loop",
+    # AttentionMLAConfig
+    "use_flash_attn",
+    "diff_attn_lambda_init",
+    "enable_prefix_lm_mask",
+    # YaRNConfig
+    "yarn_scale_factor",
+    # RhenEngineConfig
+    "rhen_calib_loss_coef",
+    "rhen_enable_deep_reasoning",
+    "rhen_confidence_threshold",
+    "rhen_enable_qwen_reasoning",
+    "rhen_enable_deepseek_reasoning",
+    "rhen_meta_reasoning_cache_size",
+    "rhen_enable_three_layer_pipeline",
+    "rhen_semantic_layer_weight",
+    "rhen_reasoning_layer_weight",
+    "rhen_generation_layer_weight",
+    "rhen_enable_confidence_routing",
+    "rhen_min_semantic_confidence",
+    "rhen_max_reasoning_depth",
+    # OrchestratorConfig
+    "use_fused_recurrent_kernels",
+    "checkpoint_policy",
+    "use_triton",
+)
+
+
+def _pop_removed_legacy_keys(owner: str, *mappings: dict) -> None:
+    """Remove ``_REMOVED_LEGACY_KEYS`` from each mapping in place, then warn once.
+
+    ``owner`` names the constructor in the message. The warning lists every
+    removed key found across all mappings, in tuple order, without repeats.
+    """
+    found = []
+    for mapping in mappings:
+        for key in _REMOVED_LEGACY_KEYS:
+            if key in mapping:
+                del mapping[key]
+                found.append(key)
+    if found:
+        warnings.warn(
+            f"{owner}: ignoring removed no-op config key(s) "
+            f"{', '.join(dict.fromkeys(found))}; they had no effect and can be deleted.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +118,6 @@ class RecurrentLoopConfig:
     loop_dropout_prob: float = 0.10
     enable_ssm_highway: bool = True   # 1D state-space memory channel across loops
     ssm_state_dim: int = 64
-    enable_symplectic_loop: bool = True  # DEPRECATED no-op: no code reads this flag
     use_step_modulation: bool = True  # FiLM step modulation per loop iteration
     fuse_multiloop_attn: bool = False
     enable_cross_loop_attention: bool = False
@@ -100,7 +158,6 @@ class AttentionMLAConfig:
     kv_lora_rank: int = 140           # MLA latent KV compression rank
     q_lora_rank: int = 280            # MLA latent query compression rank
     use_sdpa: bool = True             # fused scaled_dot_product_attention
-    use_flash_attn: bool = True       # DEPRECATED no-op: no code reads this flag
     use_qk_norm: bool = False
     # 0.0 keeps the fast SDPA attention path; >0 applies tanh softcapping on the manual path.
     attn_logit_softcapping: float = 0.0
@@ -109,13 +166,11 @@ class AttentionMLAConfig:
     diff_mla_lambda_init: float = 0.8
     # Dual subspace noise-canceling attention. None follows use_diff_mla; an explicit bool wins.
     use_differential_attention: Optional[bool] = None
-    diff_attn_lambda_init: float = 0.8  # DEPRECATED no-op: the DIFF lambda is diff_mla_lambda_init
     diff_attn_learnable_lambda: bool = True
     quantized_kv_cache: bool = False
     kv_quant_dtype: str = "fp8"
     ring_size: int = 2
     use_qkv_bias: bool = True
-    enable_prefix_lm_mask: bool = True  # DEPRECATED no-op: no code reads this flag
     interleave_swa: bool = True
     swa_window_size: int = 512
     diff_v2_head_lambda: bool = True
@@ -133,7 +188,6 @@ class YaRNConfig:
     yarn_beta_fast: float = 32.0
     yarn_beta_slow: float = 1.0
     yarn_attn_factor: float = 0.1
-    yarn_scale_factor: float = 1.0  # DEPRECATED no-op: no code reads this flag
 
 
 @dataclass
@@ -167,24 +221,9 @@ class RhenEngineConfig:
     rhen_hidden_dim: int = 256
     rhen_pointer_rank: int = 128
     rhen_ortho_loss_coef: float = 0.01
-    rhen_calib_loss_coef: float = 0.05  # DEPRECATED no-op: calibration is trained by the decision losses
     rhen_halt_confidence_threshold: float = 0.85
     rhen_enable_kv_modulation: bool = True
-    # The Rhen-layer keys below marked DEPRECATED are accepted so older configs still construct,
-    # but no code reads them: the three-layer pipeline and meta-reasoning enhancer were removed.
-    rhen_enable_deep_reasoning: bool = True          # DEPRECATED no-op
-    rhen_confidence_threshold: float = 0.75          # DEPRECATED no-op
-    rhen_enable_qwen_reasoning: bool = True          # DEPRECATED no-op
-    rhen_enable_deepseek_reasoning: bool = True      # DEPRECATED no-op
-    rhen_meta_reasoning_cache_size: int = 1000       # DEPRECATED no-op
     rhen_enable_meta_cognitive: bool = True          # live: gates MetaCognitiveMonitor self-correction flags
-    rhen_enable_three_layer_pipeline: bool = True    # DEPRECATED no-op
-    rhen_semantic_layer_weight: float = 0.4          # DEPRECATED no-op
-    rhen_reasoning_layer_weight: float = 0.35        # DEPRECATED no-op
-    rhen_generation_layer_weight: float = 0.25       # DEPRECATED no-op
-    rhen_enable_confidence_routing: bool = True      # DEPRECATED no-op
-    rhen_min_semantic_confidence: float = 0.85       # DEPRECATED no-op
-    rhen_max_reasoning_depth: int = 3                # DEPRECATED no-op
 
 
 @dataclass
@@ -225,17 +264,29 @@ class OrchestratorConfig:
     gradient_checkpointing: bool = False
     chunked_ce: bool = True
     chunked_ce_chunk_size: int = 512
-    use_fused_recurrent_kernels: bool = False  # DEPRECATED no-op: fused recurrent kernels were removed
     enable_selective_checkpoint: Optional[bool] = None  # falls back to gradient_checkpointing
-    checkpoint_policy: str = "mla,moera"  # DEPRECATED no-op: selective checkpointing was removed
     mup_enabled: bool = False
     mup_base_hidden: int = 1024
     mup_base_loops: int = 16
     enable_speculative_decoding: bool = False
     draft_loops: int = 2
     max_draft_tokens: int = 4
-    use_triton: bool = True  # DEPRECATED no-op: the Triton kernels were removed
     lr_scale_factor: float = 1.0
+
+
+# Group dataclasses accept the removed keys as well, so direct construction such as
+# RhenEngineConfig(rhen_confidence_threshold=...) still works. Each generated __init__
+# is wrapped once here, and the warning names the group class.
+for _group_cls in (
+    RecurrentLoopConfig, MoEConfig, AttentionMLAConfig, YaRNConfig,
+    ActBudgetConfig, RhenEngineConfig, LoopControlConfig, OrchestratorConfig,
+):
+    def _accept_removed_keys(self, *args, _generated_init=_group_cls.__init__, **kwargs):
+        _pop_removed_legacy_keys(type(self).__name__, kwargs)
+        _generated_init(self, *args, **kwargs)
+
+    _group_cls.__init__ = functools.wraps(_group_cls.__init__)(_accept_removed_keys)
+del _group_cls
 
 
 #: The eight group keywords accepted alongside the flat kwargs.
@@ -291,6 +342,13 @@ class EOSConfig(PretrainedConfig):
     def __hash__(self):
         return hash(self.model_type)
 
+    @classmethod
+    def from_dict(cls, config_dict, **kwargs):
+        """Build from a dict. Removed no-op keys are dropped with one warning; the caller's dict is not mutated."""
+        config_dict = dict(config_dict)
+        _pop_removed_legacy_keys(cls.__name__, config_dict, kwargs)
+        return super().from_dict(config_dict, **kwargs)
+
     def __init__(
         self,
         vocab_size: int = 50048,           # 50,048 Vocab Size (accommodates base + special tokens)
@@ -332,7 +390,6 @@ class EOSConfig(PretrainedConfig):
 
         # Attention Acceleration & Kernels
         use_sdpa: Optional[bool] = None,             # Fused scaled_dot_product_attention
-        use_flash_attn: Optional[bool] = None,       # Native FlashAttention-2 tiling in SDPA
         use_qk_norm: Optional[bool] = None,          # RMSNorm on Q/K before dot-product
         z_loss_coef: Optional[float] = None,         # logit z-loss
         initializer_range: Optional[float] = None,   # Base init std
@@ -348,12 +405,10 @@ class EOSConfig(PretrainedConfig):
         gradient_checkpointing: Optional[bool] = None,
         chunked_ce: Optional[bool] = None,
         chunked_ce_chunk_size: Optional[int] = None,
-        use_fused_recurrent_kernels: Optional[bool] = None,
         enable_grouped_gemm: Optional[bool] = None,
         quantized_kv_cache: Optional[bool] = None,
         kv_quant_dtype: Optional[str] = None,
         enable_selective_checkpoint: Optional[bool] = None,
-        checkpoint_policy: Optional[str] = None,
         mup_enabled: Optional[bool] = None,
         mup_base_hidden: Optional[int] = None,
         mup_base_loops: Optional[int] = None,
@@ -368,13 +423,11 @@ class EOSConfig(PretrainedConfig):
         ring_size: Optional[int] = None,
         max_draft_tokens: Optional[int] = None,
         router_type: Optional[str] = None,
-        use_triton: Optional[bool] = None,
         lr_scale_factor: Optional[float] = None,
 
         # Architectural enhancements
         attn_logit_softcapping: Optional[float] = None,
         final_logit_softcapping: Optional[float] = None,
-        yarn_scale_factor: Optional[float] = None,
         contraction_loss_coef: Optional[float] = None,
         loop_dropout_prob: Optional[float] = None,
         router_z_loss_coef: Optional[float] = None,
@@ -382,7 +435,6 @@ class EOSConfig(PretrainedConfig):
         # Experimental Looping Upgrades
         enable_ssm_highway: Optional[bool] = None,   # State-Space Memory channel across loops
         ssm_state_dim: Optional[int] = None,
-        enable_symplectic_loop: Optional[bool] = None,
         enable_titans_memory: Optional[bool] = None,    # Titans MAG neural long-term memory
         enable_episodic_memory: Optional[bool] = None,  # Modern-Hopfield episodic memory bank
         titans_d_mem: Optional[int] = None,             # Titans memory slot dimension
@@ -405,10 +457,8 @@ class EOSConfig(PretrainedConfig):
         use_diff_mla: Optional[bool] = None,
         diff_mla_lambda_init: Optional[float] = None,
         use_differential_attention: Optional[bool] = None,
-        diff_attn_lambda_init: Optional[float] = None,
         diff_attn_learnable_lambda: Optional[bool] = None,
         use_qkv_bias: Optional[bool] = None,
-        enable_prefix_lm_mask: Optional[bool] = None,
         interleave_swa: Optional[bool] = None,
         swa_window_size: Optional[int] = None,
         diff_v2_head_lambda: Optional[bool] = None,
@@ -448,22 +498,9 @@ class EOSConfig(PretrainedConfig):
         rhen_hidden_dim: Optional[int] = None,
         rhen_pointer_rank: Optional[int] = None,
         rhen_ortho_loss_coef: Optional[float] = None,
-        rhen_calib_loss_coef: Optional[float] = None,
         rhen_halt_confidence_threshold: Optional[float] = None,
         rhen_enable_kv_modulation: Optional[bool] = None,
-        rhen_enable_deep_reasoning: Optional[bool] = None,
-        rhen_confidence_threshold: Optional[float] = None,
-        rhen_enable_qwen_reasoning: Optional[bool] = None,
-        rhen_enable_deepseek_reasoning: Optional[bool] = None,
-        rhen_meta_reasoning_cache_size: Optional[int] = None,
         rhen_enable_meta_cognitive: Optional[bool] = None,
-        rhen_enable_three_layer_pipeline: Optional[bool] = None,
-        rhen_semantic_layer_weight: Optional[float] = None,
-        rhen_reasoning_layer_weight: Optional[float] = None,
-        rhen_generation_layer_weight: Optional[float] = None,
-        rhen_enable_confidence_routing: Optional[bool] = None,
-        rhen_min_semantic_confidence: Optional[float] = None,
-        rhen_max_reasoning_depth: Optional[int] = None,
 
         # Nested group objects (Phase B1). See module docstring.
         recurrent: Optional[RecurrentLoopConfig] = None,
@@ -476,6 +513,9 @@ class EOSConfig(PretrainedConfig):
         orchestrator: Optional[OrchestratorConfig] = None,
         **kwargs
     ):
+        # ---- Removed no-op keys: accept, drop, warn (see _REMOVED_LEGACY_KEYS) ----
+        _pop_removed_legacy_keys(type(self).__name__, kwargs)
+
         # ---- Resolve the eight groups -------------------------------------
         # Defaults live in the group dataclasses; explicit flat kwargs (the
         # non-None sentinel values below) override them; a passed group object
@@ -497,7 +537,6 @@ class EOSConfig(PretrainedConfig):
             loop_dropout_prob=loop_dropout_prob,
             enable_ssm_highway=enable_ssm_highway,
             ssm_state_dim=ssm_state_dim,
-            enable_symplectic_loop=enable_symplectic_loop,
             use_step_modulation=use_step_modulation,
             fuse_multiloop_attn=fuse_multiloop_attn,
             enable_cross_loop_attention=enable_cross_loop_attention,
@@ -530,20 +569,17 @@ class EOSConfig(PretrainedConfig):
             kv_lora_rank=kv_lora_rank,
             q_lora_rank=q_lora_rank,
             use_sdpa=use_sdpa,
-            use_flash_attn=use_flash_attn,
             use_qk_norm=use_qk_norm,
             attn_logit_softcapping=attn_logit_softcapping,
             final_logit_softcapping=final_logit_softcapping,
             use_diff_mla=use_diff_mla,
             diff_mla_lambda_init=diff_mla_lambda_init,
             use_differential_attention=use_differential_attention,
-            diff_attn_lambda_init=diff_attn_lambda_init,
             diff_attn_learnable_lambda=diff_attn_learnable_lambda,
             quantized_kv_cache=quantized_kv_cache,
             kv_quant_dtype=kv_quant_dtype,
             ring_size=ring_size,
             use_qkv_bias=use_qkv_bias,
-            enable_prefix_lm_mask=enable_prefix_lm_mask,
             interleave_swa=interleave_swa,
             swa_window_size=swa_window_size,
             diff_v2_head_lambda=diff_v2_head_lambda,
@@ -557,7 +593,6 @@ class EOSConfig(PretrainedConfig):
             yarn_beta_fast=yarn_beta_fast,
             yarn_beta_slow=yarn_beta_slow,
             yarn_attn_factor=yarn_attn_factor,
-            yarn_scale_factor=yarn_scale_factor,
         )))
         act_budget_g = ActBudgetConfig(**_merge_group(act_budget_g, dict(
             enable_act=enable_act,
@@ -583,22 +618,9 @@ class EOSConfig(PretrainedConfig):
             rhen_hidden_dim=rhen_hidden_dim,
             rhen_pointer_rank=rhen_pointer_rank,
             rhen_ortho_loss_coef=rhen_ortho_loss_coef,
-            rhen_calib_loss_coef=rhen_calib_loss_coef,
             rhen_halt_confidence_threshold=rhen_halt_confidence_threshold,
             rhen_enable_kv_modulation=rhen_enable_kv_modulation,
-            rhen_enable_deep_reasoning=rhen_enable_deep_reasoning,
-            rhen_confidence_threshold=rhen_confidence_threshold,
-            rhen_enable_qwen_reasoning=rhen_enable_qwen_reasoning,
-            rhen_enable_deepseek_reasoning=rhen_enable_deepseek_reasoning,
-            rhen_meta_reasoning_cache_size=rhen_meta_reasoning_cache_size,
             rhen_enable_meta_cognitive=rhen_enable_meta_cognitive,
-            rhen_enable_three_layer_pipeline=rhen_enable_three_layer_pipeline,
-            rhen_semantic_layer_weight=rhen_semantic_layer_weight,
-            rhen_reasoning_layer_weight=rhen_reasoning_layer_weight,
-            rhen_generation_layer_weight=rhen_generation_layer_weight,
-            rhen_enable_confidence_routing=rhen_enable_confidence_routing,
-            rhen_min_semantic_confidence=rhen_min_semantic_confidence,
-            rhen_max_reasoning_depth=rhen_max_reasoning_depth,
         )))
         loop_control_g = LoopControlConfig(**_merge_group(loop_control_g, dict(
             enable_step_size_control=enable_step_size_control,
@@ -631,16 +653,13 @@ class EOSConfig(PretrainedConfig):
             gradient_checkpointing=gradient_checkpointing,
             chunked_ce=chunked_ce,
             chunked_ce_chunk_size=chunked_ce_chunk_size,
-            use_fused_recurrent_kernels=use_fused_recurrent_kernels,
             enable_selective_checkpoint=enable_selective_checkpoint,
-            checkpoint_policy=checkpoint_policy,
             mup_enabled=mup_enabled,
             mup_base_hidden=mup_base_hidden,
             mup_base_loops=mup_base_loops,
             enable_speculative_decoding=enable_speculative_decoding,
             draft_loops=draft_loops,
             max_draft_tokens=max_draft_tokens,
-            use_triton=use_triton,
             lr_scale_factor=lr_scale_factor,
         )))
 
@@ -657,7 +676,6 @@ class EOSConfig(PretrainedConfig):
         self.loop_dropout_prob = recurrent_g.loop_dropout_prob
         self.enable_ssm_highway = recurrent_g.enable_ssm_highway
         self.ssm_state_dim = recurrent_g.ssm_state_dim
-        self.enable_symplectic_loop = recurrent_g.enable_symplectic_loop
         self.use_step_modulation = recurrent_g.use_step_modulation
         self.fuse_multiloop_attn = recurrent_g.fuse_multiloop_attn
         self.enable_cross_loop_attention = recurrent_g.enable_cross_loop_attention
@@ -690,7 +708,6 @@ class EOSConfig(PretrainedConfig):
         self.kv_lora_rank = attention_g.kv_lora_rank
         self.q_lora_rank = attention_g.q_lora_rank
         self.use_sdpa = attention_g.use_sdpa
-        self.use_flash_attn = attention_g.use_flash_attn
         self.use_qk_norm = attention_g.use_qk_norm
         self.attn_logit_softcapping = attention_g.attn_logit_softcapping
         self.final_logit_softcapping = attention_g.final_logit_softcapping
@@ -703,13 +720,11 @@ class EOSConfig(PretrainedConfig):
             if attention_g.use_differential_attention is not None
             else bool(attention_g.use_diff_mla)
         )
-        self.diff_attn_lambda_init = attention_g.diff_attn_lambda_init
         self.diff_attn_learnable_lambda = attention_g.diff_attn_learnable_lambda
         self.quantized_kv_cache = attention_g.quantized_kv_cache
         self.kv_quant_dtype = attention_g.kv_quant_dtype
         self.ring_size = attention_g.ring_size
         self.use_qkv_bias = attention_g.use_qkv_bias
-        self.enable_prefix_lm_mask = attention_g.enable_prefix_lm_mask
         self.interleave_swa = attention_g.interleave_swa
         self.swa_window_size = attention_g.swa_window_size
         self.diff_v2_head_lambda = attention_g.diff_v2_head_lambda
@@ -723,7 +738,6 @@ class EOSConfig(PretrainedConfig):
         self.yarn_beta_fast = yarn_g.yarn_beta_fast
         self.yarn_beta_slow = yarn_g.yarn_beta_slow
         self.yarn_attn_factor = yarn_g.yarn_attn_factor
-        self.yarn_scale_factor = yarn_g.yarn_scale_factor
 
         # ---- Flatten: ActBudgetConfig (with the historical clamps) -----------
         self.enable_act = act_budget_g.enable_act
@@ -777,20 +791,17 @@ class EOSConfig(PretrainedConfig):
         self.gradient_checkpointing = orchestrator_g.gradient_checkpointing
         self.chunked_ce = orchestrator_g.chunked_ce
         self.chunked_ce_chunk_size = orchestrator_g.chunked_ce_chunk_size
-        self.use_fused_recurrent_kernels = orchestrator_g.use_fused_recurrent_kernels
         self.enable_selective_checkpoint = (
             orchestrator_g.enable_selective_checkpoint
             if orchestrator_g.enable_selective_checkpoint is not None
             else orchestrator_g.gradient_checkpointing
         )
-        self.checkpoint_policy = orchestrator_g.checkpoint_policy
         self.mup_enabled = orchestrator_g.mup_enabled
         self.mup_base_hidden = orchestrator_g.mup_base_hidden
         self.mup_base_loops = orchestrator_g.mup_base_loops
         self.enable_speculative_decoding = orchestrator_g.enable_speculative_decoding
         self.draft_loops = orchestrator_g.draft_loops
         self.max_draft_tokens = orchestrator_g.max_draft_tokens
-        self.use_triton = orchestrator_g.use_triton
         self.lr_scale_factor = orchestrator_g.lr_scale_factor
 
         if hasattr(super(), "__init__"):

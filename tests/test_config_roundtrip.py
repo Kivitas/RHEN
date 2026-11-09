@@ -9,7 +9,7 @@ Locks the invariants the decomposition depends on:
 4. Group snapshots are live views derived from flat state, never instance
    state, so they cannot leak into ``to_dict()`` or checkpoint serialization.
 5. The full ``EOSConfig(**flat_kwargs).to_dict()`` round-trip is lossless
-   across the entire 141-parameter flat surface.
+   across the entire 120-parameter flat surface.
 6. The legacy ``LoopedLLMConfig`` alias is still the same class.
 
 Run directly (script mode, battery style) or via pytest/unittest.
@@ -35,7 +35,8 @@ from config import (
 
 def _historical_flat_defaults() -> dict:
     """Expected flat defaults: the pre-B1 EOSConfig values with the deliberate B1
-    changes applied (fused kernels off, softcapping 0.0, Titans/episodic keys).
+    changes applied (softcapping 0.0, Titans/episodic keys). Keys removed as
+    no-ops in RHEN 1.0.0 are no longer part of the surface.
     Keys that entered the flat surface with the nested-groups refactor or later
     use their committed group defaults.
     """
@@ -68,7 +69,6 @@ def _historical_flat_defaults() -> dict:
         "act_ponder_penalty": 0.0001,
         "use_step_modulation": True,
         "use_sdpa": True,
-        "use_flash_attn": True,
         "use_qk_norm": False,
         "z_loss_coef": 1e-4,
         "initializer_range": 0.02,
@@ -80,12 +80,10 @@ def _historical_flat_defaults() -> dict:
         "gradient_checkpointing": False,
         "chunked_ce": True,
         "chunked_ce_chunk_size": 512,
-        "use_fused_recurrent_kernels": False,  # B1: deprecated no-op, default False
         "enable_grouped_gemm": True,
         "quantized_kv_cache": False,
         "kv_quant_dtype": "fp8",
         "enable_selective_checkpoint": False,
-        "checkpoint_policy": "mla,moera",
         "mup_enabled": False,
         "mup_base_hidden": 1024,
         "mup_base_loops": 16,
@@ -101,17 +99,14 @@ def _historical_flat_defaults() -> dict:
         "ring_size": 2,
         "max_draft_tokens": 4,
         "router_type": "sigmoid",
-        "use_triton": True,
         "lr_scale_factor": 1.0,
         "attn_logit_softcapping": 0.0,  # B1: 0.0 keeps the fast SDPA path
         "final_logit_softcapping": 30.0,
-        "yarn_scale_factor": 1.0,
         "contraction_loss_coef": 0.01,
         "loop_dropout_prob": 0.10,
         "router_z_loss_coef": 0.001,
         "enable_ssm_highway": True,
         "ssm_state_dim": 64,
-        "enable_symplectic_loop": True,
         "use_shared_expert_moe": True,
         "num_shared_experts": 1,
         "num_routed_experts": 8,
@@ -126,10 +121,8 @@ def _historical_flat_defaults() -> dict:
         "use_diff_mla": True,
         "diff_mla_lambda_init": 0.8,
         "use_differential_attention": True,  # derived: bool(use_diff_mla) while the group value is None
-        "diff_attn_lambda_init": 0.8,
         "diff_attn_learnable_lambda": True,
         "diff_v2_head_lambda": True,
-        "enable_prefix_lm_mask": True,
         "interleave_swa": True,
         "swa_window_size": 512,
         "use_qkv_bias": True,
@@ -163,22 +156,9 @@ def _historical_flat_defaults() -> dict:
         "rhen_hidden_dim": 256,
         "rhen_pointer_rank": 128,
         "rhen_ortho_loss_coef": 0.01,
-        "rhen_calib_loss_coef": 0.05,
         "rhen_halt_confidence_threshold": 0.85,
         "rhen_enable_kv_modulation": True,
-        "rhen_enable_deep_reasoning": True,
-        "rhen_confidence_threshold": 0.75,
-        "rhen_enable_qwen_reasoning": True,
-        "rhen_enable_deepseek_reasoning": True,
-        "rhen_meta_reasoning_cache_size": 1000,
         "rhen_enable_meta_cognitive": True,
-        "rhen_enable_three_layer_pipeline": True,
-        "rhen_semantic_layer_weight": 0.4,
-        "rhen_reasoning_layer_weight": 0.35,
-        "rhen_generation_layer_weight": 0.25,
-        "rhen_enable_confidence_routing": True,
-        "rhen_min_semantic_confidence": 0.85,
-        "rhen_max_reasoning_depth": 3,
     }
 
 
@@ -247,7 +227,7 @@ class TestEOSConfigRoundTrip(unittest.TestCase):
         self.assertIsNot(cfg.loop_control, cfg.loop_control)
 
     def test_to_dict_roundtrip_full_flat_surface(self):
-        """EOSConfig(**all 141 flat kwargs).to_dict() -> EOSConfig(**flat) is lossless."""
+        """EOSConfig(**all 120 flat kwargs).to_dict() -> EOSConfig(**flat) is lossless."""
         all_kwargs = _historical_flat_defaults()
         all_kwargs.update({
             "vocab_size": 50048,
