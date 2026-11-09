@@ -10,7 +10,7 @@ RHEN eliminates token generation overhead for agent tool orchestration and multi
 
 - **Step 1: Clone the Repository**:
    ```bash
-   git clone https://github.com/your-org/rhen.git
+   git clone https://github.com/Kivitas/RHEN.git
    cd rhen
    ```
 
