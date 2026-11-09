@@ -66,6 +66,7 @@ print(f"Action: {result.choice_label} (Confidence: {result.confidence:.2%}, Abst
 - [Serialization & Storage Guide](#serialization--storage-guide)
 - [CLI Reference](#cli-reference)
 - [Verification & Test Battery](#verification--test-battery)
+- [Known limitations](#known-limitations)
 
 ---
 
@@ -95,13 +96,13 @@ RHEN replaces autoregression with **Joint Evaluation (JEV)**:
 
 | Dimension | Monolithic Autoregressive LLM | RHEN JEV Decision Engine |
 | :--- | :--- | :--- |
-| **Inference Latency** | $O(N)$ sequential autoregressive token steps (200ms - 3000ms+) | **$O(1)$ single forward pass** (<15ms on GPU, <50ms CPU) |
+| **Inference Latency** | $O(N)$ sequential autoregressive token steps (200ms - 3000ms+) | **$O(1)$ single forward pass**. Design target: <15ms on GPU, <50ms CPU (not yet benchmarked in this repo; see [Known limitations](#known-limitations)) |
 | **Decision Representation** | Free-form text / JSON strings subject to syntax errors | **Typed Semantic Primitives** (`Choice`, `Range`, `Extract`, etc.) |
 | **Confidence Calibration** | Uncalibrated token-level softmax; overconfident on hallucinations | **Empirically calibrated probabilities** with dynamic entropy temperature |
 | **Statistical Guarantees** | None (heuristic prompting) | **$1 - \alpha$ Split-Conformal Prediction** coverage guarantees |
 | **Out-of-Distribution (OOD)**| Confidently hallucinated answers on unfamiliar distributions | **Helmholtz Free Energy** and **Geometric Convex-Hull Abstention** |
 | **Safety & Authorization** | Post-hoc regex or vulnerable prompt guardrails | **Cryptographic HMAC-SHA256 Action Cards**, **Dual-Custody**, & **BFT Consensus** |
-| **Auditability** | In-process log files easily deleted by rogue agents (arXiv:2609.30266) | **Out-of-Band Audit Ledger** and **Merkle Tree Inclusion Proofs** (<0.1ms) |
+| **Auditability** | In-process log files easily deleted by rogue agents (arXiv:2609.30266) | **Out-of-Band Audit Ledger** (records already emitted cannot be rewritten undetected, but a compromised agent can still emit false records; see [Known limitations](#known-limitations)) and **Merkle Tree Inclusion Proofs** (design target: <0.1ms, not yet benchmarked) |
 | **Backbone Compatibility** | Locked to proprietary LLM APIs | **Standalone looped core** OR **attached to ANY HuggingFace model** |
 
 ---
@@ -452,10 +453,12 @@ Destructive operations cannot be executed by a single agent persona. For `critic
 ### Merkle Action Ledger
 All staged and executed actions are appended into a domain-separated cryptographic Merkle tree:
 - Leaf hash: $\text{SHA256}(0\text{x}00 \parallel \text{JSON}(\text{stage}, \text{card\_id}, \text{risk\_tier}, \text{status}, \text{signature}, \text{timestamp}))$
-- Inclusion proofs verify in **less than 0.1 milliseconds** ($\approx 10\ \mu\text{s}$), allowing instant proof-of-staging verification.
+- Design target: inclusion proofs verify in **under 0.1 milliseconds** ($\approx 10\ \mu\text{s}$). This has not been benchmarked in this repository, and no benchmark script for it is included yet.
 
 ### Out-of-Band Audit Trail
-Recent research (arXiv:2609.30266) demonstrated that LLM agents rewarded for task success easily delete or rewrite their own execution logs. In RHEN, the `OutOfBandAuditLedger` streams cryptographically sealed audit records over a dedicated UNIX socket or TCP port (`SocketAuditSink`). The agent holds no sealing key—records are sealed externally, rendering retroactive history deletion impossible. Missing sequence numbers are automatically detected as trace omission attacks.
+Recent research (arXiv:2609.30266) demonstrated that LLM agents rewarded for task success easily delete or rewrite their own execution logs. In RHEN, the `OutOfBandAuditLedger` can stream cryptographically sealed audit records over a dedicated UNIX socket or TCP port (`SocketAuditSink`). The agent holds no sealing key, and the receiver seals each record with its own key. Each entry hash is chained to its predecessor, so a record that has already been emitted to the receiver cannot be altered or removed from the middle of the chain without detection. Sequence gaps against a sequence number the auditor already expects are reported as omissions.
+
+**Limitations.** The receiver authenticates what it received, not whether it is true. A compromised agent can still emit new records with false content, and those records will verify. It can also stop emitting, and a silent stop at the end of the stream is not detectable from the stored records alone. Records that were never emitted, or were rewritten before emission, are outside the guarantee. Local sealing modes (`InProcessAuditSink`, `FileAuditSink`) keep the key in the agent's own process and only detect casual edits and corruption. See [Known limitations](#known-limitations).
 
 ---
 
@@ -696,7 +699,7 @@ rhen-train --config configs/rhen_base.json --lr 3e-4 --epochs 5
 
 ## Verification & Test Battery
 
-RHEN is backed by a comprehensive regression and mathematical verification test battery (23 distinct test suites covering all 13 architectural pillars):
+RHEN is backed by a regression and mathematical verification test battery (25 test modules in `tests/`, covering all 13 architectural pillars):
 
 ```bash
 # Run the master verification battery
@@ -708,9 +711,18 @@ pytest tests/
 
 Key verified properties:
 - **Permutation Invariance**: Maximum deviation $|P(\mathcal{O}) - \pi^{-1}(P(\pi(\mathcal{O})))| \le 10^{-5}$ across random candidate orderings.
-- **Proof-of-Staging**: Merkle inclusion proof generation and verification executes in $< 0.1\ \text{ms}$ per leaf.
+- **Proof-of-Staging**: Merkle inclusion proof generation and verification is checked for correctness by the test battery. The $< 0.1\ \text{ms}$ per-leaf figure is a design target and is not benchmarked in this repository.
 - **Tamper Detection**: Payload modifications or trace omissions trigger immediate cryptographic rejection.
 - **Differentiable Backprop**: Multi-task gradients flow seamlessly into both pointer heads and underlying encoder backbones.
+
+---
+
+## Known limitations
+
+- **Audit threat model.** The audit ledger does not prove that logged content is true. A compromised agent can emit new records with false content, and they will verify. A silent stop at the end of the stream is not detectable from the stored records alone. Local sealing modes hold the key inside the agent process. See [Out-of-Band Audit Trail](#out-of-band-audit-trail).
+- **Benchmark numbers are unreproduced.** The latency and proof-timing figures in this README (<15ms on GPU, <50ms on CPU, <0.1ms for Merkle proofs) are design targets. No committed benchmark output exists yet. `examples/06_latency_and_jev_comparison.py` measures decision latency on your hardware and model, but no script in the repository times Merkle proof verification.
+- **Checkpoint loading trusts the file.** `rhen/research/checkpointing.py` loads optimizer and RNG state with `torch.load(..., weights_only=False)`. Load checkpoints only from a trusted source.
+- **Large flat configuration.** `RhenConfig` (an alias of `EOSConfig` in `rhen/config.py`) takes about 150 named keyword parameters, plus `**kwargs`. Check parameter names against the source before use.
 
 ---
 
