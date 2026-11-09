@@ -47,6 +47,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import os
@@ -366,12 +367,40 @@ class SocketAuditSink(_BaseAuditSink):
                 self._sock = None
 
 
+def _tcp_bind_host(host: str, allow_remote: bool = False) -> str:
+    """
+    Return the address a TCP audit receiver binds to for ``host``.
+
+    An empty host (``":9000"``) and ``localhost`` bind ``127.0.0.1``. Any other
+    loopback IP literal binds as given. Every other host, including ``0.0.0.0``,
+    a LAN address and a hostname, raises ``ValueError`` unless ``allow_remote`` is
+    True. The receiver does not authenticate frames, so exposing it beyond loopback
+    lets any peer that can reach the port inject records that pass the hash check.
+    """
+    name = host.strip("[]")
+    if name == "" or name.lower() == "localhost":
+        return "127.0.0.1"
+    try:
+        if ipaddress.ip_address(name).is_loopback:
+            return name
+    except ValueError:
+        pass
+    if allow_remote:
+        return name
+    raise ValueError(
+        f"refusing to bind the audit receiver to non-loopback host {host!r}; "
+        "pass allow_remote=True to opt in (frames are not authenticated)"
+    )
+
+
 def serve_audit_socket(
     address: str,
     store_path: str,
     stop_event: Optional[threading.Event] = None,
     max_iterations: Optional[int] = None,
     key: Optional[bytes] = None,
+    *,
+    allow_remote: bool = False,
 ) -> None:
     """Reference audit receiver for :class:`SocketAuditSink`. It seals what it stores.
 
@@ -382,16 +411,25 @@ def serve_audit_socket(
     to ``store_path`` with a MAC computed by this receiver's ``key``. Any ``mac`` the
     sender supplied is ignored. Use :func:`verify_sealed_records` to check the store.
 
+    Frames are not authenticated: the receiver accepts any well-formed frame from any
+    peer that can reach its socket. For that reason a TCP receiver binds loopback only
+    by default. ``allow_remote=True`` is an explicit opt-in to bind a non-loopback host,
+    and the caller then owns the network exposure.
+
     Args:
-        address: ``/path/to.sock`` (unix) or ``host:port`` (tcp).
+        address: ``/path/to.sock`` (unix) or ``host:port`` (tcp). An empty host binds
+            ``127.0.0.1``.
         store_path: newline-delimited JSON destination.
         stop_event: set this to request a graceful shutdown.
         max_iterations: stop after N accepted records (used by the test suite).
             Rejected frames are not counted.
         key: sealing key, at least 16 bytes. Required.
+        allow_remote: opt in to binding a non-loopback TCP host. Off by default.
 
     Raises:
-        ValueError: when ``key`` is missing or shorter than 16 bytes.
+        ValueError: when ``key`` is missing or shorter than 16 bytes, when the TCP
+            address is not ``host:port``, or when the host is non-loopback without
+            ``allow_remote=True``. All of these are checked before a socket is created.
     """
     if not isinstance(key, (bytes, bytearray)) or len(key) < _MIN_AUDIT_KEY_BYTES:
         raise ValueError("serve_audit_socket requires a sealing key of at least 16 bytes")
@@ -399,17 +437,19 @@ def serve_audit_socket(
     stop_event = stop_event or threading.Event()
     family = _resolve_family(address)
     unix_mode = family == getattr(socket, "AF_UNIX", object())
+    if not unix_mode:
+        host, _, port = address.rpartition(":")
+        if not port.isdigit():
+            raise ValueError(f"not a host:port endpoint: {address!r}")
+        bind_target = (_tcp_bind_host(host, allow_remote), int(port))
     server = socket.socket(family, socket.SOCK_STREAM)
     if unix_mode:
         if os.path.exists(address):
             os.unlink(address)
         server.bind(address)
     else:
-        host, _, port = address.rpartition(":")
-        if not port.isdigit():
-            raise ValueError(f"not a host:port endpoint: {address!r}")
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((host or "127.0.0.1", int(port)))
+        server.bind(bind_target)
     server.listen(4)
     server.settimeout(0.25)
 
