@@ -1,0 +1,152 @@
+{
+  "benchmark": "banking77",
+  "task": "English intent classification, 77 labels",
+  "dataset": {
+    "hf_dataset": "PolyAI/banking77",
+    "hf_revision": "1846984189f2bc0ac51c6fc3a600fa9e1714e0c6",
+    "loader": "datasets-server rows API (JSON, cached)",
+    "splits": {
+      "train": {
+        "rows": 10003,
+        "file": "PolyAI__banking77-train.json",
+        "sha256": "2b0d54f2ea9ceba6857f26ff6c2fa669c1c3e5cc22d8828bbbe3a433ad0b75fd"
+      },
+      "test": {
+        "rows": 3080,
+        "file": "PolyAI__banking77-test.json",
+        "sha256": "0a4a43118aecc816843e8bd71ce9db90f49965315aac6b51c8192940d2ea08c3"
+      }
+    },
+    "num_labels": 77
+  },
+  "sampling": {
+    "sampled": false,
+    "limit": null,
+    "seed": 0,
+    "test_examples_total": 3080,
+    "test_examples_evaluated": 3080,
+    "rhen_limit": 3,
+    "rhen_examples_evaluated": 3,
+    "method": "numpy default_rng(seed).choice without replacement, sorted"
+  },
+  "seed": 0,
+  "commit": "4b51f1c6e9a2f9f203649e87fb4ea56de9ac09b7",
+  "worktree_dirty": false,
+  "environment": {
+    "python": "3.13.18",
+    "numpy": "2.5.3",
+    "torch": "2.15.0",
+    "platform": "Linux-6.18.44-fc-v310-x86_64-with-glibc2.39"
+  },
+  "command": "python3 benchmarks/banking77/run_eval.py --seed 0 --rhen-limit 3 --cache-dir /tmp/claude-0/-home-user-RHEN/6dd363ce-df00-55a1-9202-94727a346671/scratchpad/data",
+  "variants": {
+    "majority_class": {
+      "status": "ok",
+      "n": 3080,
+      "correct": 40,
+      "top1_accuracy": 0.012987012987012988,
+      "wilson95": [
+        0.009551950679865459,
+        0.017635393397399887
+      ],
+      "ece_10bin": 0.005707378695482268,
+      "abstain_rate": null,
+      "accuracy_on_answered": null,
+      "seconds_per_example": 3.3483441555219615e-07,
+      "majority_label_index": 15,
+      "fit_seconds": 0.0,
+      "notes": "probabilities are the training label prior"
+    },
+    "tfidf_nearest_centroid": {
+      "status": "ok",
+      "n": 3080,
+      "correct": 2490,
+      "top1_accuracy": 0.8084415584415584,
+      "wilson95": [
+        0.7941628341155017,
+        0.8219518479688969
+      ],
+      "ece_10bin": null,
+      "abstain_rate": null,
+      "accuracy_on_answered": null,
+      "seconds_per_example": 4.7962166883127034e-05,
+      "features": "TF-IDF, vocabulary 1495 terms (min_df=2, train only)",
+      "fit_seconds": 0.7294051310000214,
+      "notes": "no probability output, so no ECE and no abstain signal"
+    },
+    "tfidf_logistic_regression": {
+      "status": "ok",
+      "n": 3080,
+      "correct": 2707,
+      "top1_accuracy": 0.8788961038961038,
+      "wilson95": [
+        0.8668998264436328,
+        0.8899484198642545
+      ],
+      "ece_10bin": 0.3710274298899117,
+      "abstain_rate": null,
+      "accuracy_on_answered": null,
+      "seconds_per_example": 4.8938625974046006e-05,
+      "features": "TF-IDF, vocabulary 1495 terms (min_df=2, train only)",
+      "fit_seconds": 147.74586063800007,
+      "hyperparameters": {
+        "optimizer": "full-batch gradient descent",
+        "epochs": 300,
+        "l2": 0.0001,
+        "lr_grid": [
+          0.5,
+          2.0,
+          8.0,
+          32.0,
+          128.0
+        ],
+        "lr_selected": 128.0,
+        "validation": "10% of train, permutation seed+1",
+        "validation_search": [
+          {
+            "lr": 0.5,
+            "val_accuracy": 0.343
+          },
+          {
+            "lr": 2.0,
+            "val_accuracy": 0.66
+          },
+          {
+            "lr": 8.0,
+            "val_accuracy": 0.779
+          },
+          {
+            "lr": 32.0,
+            "val_accuracy": 0.846
+          },
+          {
+            "lr": 128.0,
+            "val_accuracy": 0.87
+          }
+        ]
+      },
+      "notes": "probabilities are the softmax of the fitted logits"
+    },
+    "rhen_untrained": {
+      "status": "ok",
+      "n": 3,
+      "correct": 0,
+      "top1_accuracy": 0.0,
+      "wilson95": [
+        5.551115123125783e-17,
+        0.5614970317550454
+      ],
+      "ece_10bin": 0.013606442759434382,
+      "abstain_rate": 1.0,
+      "accuracy_on_answered": null,
+      "seconds_per_example": 286.8853947089997,
+      "trained": false,
+      "model": "RhenEngine() default EOSConfig, randomly initialised, no checkpoint, no training",
+      "question": "Which banking intent?",
+      "options": "dataset label names, unmodified",
+      "device": "cpu",
+      "torch_version": "2.15.0+cu132",
+      "notes": "expected near chance; this measures an untrained model, not a trained RHEN head"
+    }
+  }
+}

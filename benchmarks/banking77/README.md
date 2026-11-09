@@ -65,6 +65,32 @@ The RHEN variant needs `torch` and `rhen` to import. If either fails, the varian
   n, so their figures are amortised. The RHEN figure is per call to `choice()`, on CPU. The
   latency figures are not comparable across these two modes.
 
+## Results
+
+Commit `4b51f1c`, seed 0, `results.json` in this directory. The baselines ran on the full test
+split (3,080 examples). The RHEN variant ran on the first 3 test rows only (see below).
+
+| variant | n | top-1 | 95% Wilson CI | ECE (10 bins) | abstain rate |
+|---|---|---|---|---|---|
+| majority_class | 3080 | 1.30% | [0.96%, 1.76%] | 0.57% | n/a |
+| tfidf_nearest_centroid | 3080 | 80.84% | [79.42%, 82.20%] | n/a | n/a |
+| tfidf_logistic_regression | 3080 | 87.89% | [86.69%, 88.99%] | 37.10% | n/a |
+| rhen_untrained | 3 | 0.00% | [0.00%, 56.15%] | 1.36% | 100% (3 of 3) |
+
+Notes:
+
+- **RHEN sample.** One `choice()` call with 77 options took 248 to 352 seconds on the 4-core CPU
+  used here (torch 2.15.0, CPU only, default configuration). Full-split RHEN would take days, so it
+  was limited to 3 rows. Those 3 results check that the pipeline runs and record its timing. They
+  do not estimate accuracy: the 95% interval runs from 0% to 56%. All 3 calls returned
+  `NeedClarification`, with the reasons "conformal uncalibrated" and "top-2 margin".
+- **Logistic regression.** The selected learning rate was 128, the top of the grid. Validation
+  accuracy was still rising at that value, so the model is probably under-trained after 300 epochs.
+  The grid was not extended further. The ECE of 37% reflects the overconfident, unregularised
+  softmax at that learning rate. The probabilities are not calibrated.
+- **Timing.** Baseline seconds per example are batch times divided by n. The RHEN figure is per
+  call on CPU. The two are not comparable.
+
 ## What the numbers do not show
 
 - No trained RHEN head. The RHEN variant is untrained and measures only the untrained model.
@@ -83,3 +109,6 @@ latency of "<15ms on GPU, <50ms CPU" (line 98), and that the `HierarchicalChoice
 <25% of options without accuracy loss" on the 77 Banking77 intents (line 468). The `rhen-eval`
 section (line 682) refers to a `benchmark_decisions.jsonl` file that is not in the repository.
 Those claims remain unmeasured until a run on this split or another labelled set supports them.
+The one latency number this run produced is far from the README figure: the default-configuration
+RHEN took 248 to 352 seconds per call on a 4-core CPU (3 calls, 77 options). The README's "<50ms CPU"
+figure is not reproduced here, and this run does not establish which configuration it refers to.
