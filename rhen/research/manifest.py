@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from eos_research.device import describe_environment
+from rhen.research.device import describe_environment
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

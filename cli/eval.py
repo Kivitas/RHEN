@@ -16,12 +16,12 @@ import os
 import sys
 from typing import Any, Dict, Optional, Sequence
 
-from eos_research import device as devmod
-from eos_research.checkpointing import load_model_from_checkpoint
-from eos_research.data import DecisionExample, load_decision_jsonl
-from eos_research.evaluate import decision_report
-from eos_research.manifest import write_json
-from eos_research.presets import preset_config
+from rhen.research import device as devmod
+from rhen.research.checkpointing import load_model_from_checkpoint
+from rhen.research.data import DecisionExample, load_decision_jsonl
+from rhen.research.evaluate import decision_report
+from rhen.research.manifest import write_json
+from rhen.research.presets import preset_config
 try:
     from rhen.config import EOSConfig
     from rhen.model import EOSModel

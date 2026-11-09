@@ -15,14 +15,14 @@ try:
 except ImportError:
     from config import EOSConfig
     from eos_loop import FlashLoopUpdater, LoopCurriculum, StepSizeController
-from optim.grouped_gemm import GroupedGEMMWrapper
-from optim.quantized_kv import QuantizedMultiLatentAttention
-from optim.checkpoint import CheckpointedRecurrentCore
-from optim.mup import apply_mup_init, create_mup_config
-from optim.advanced_loops import (
+from rhen.optim.grouped_gemm import GroupedGEMMWrapper
+from rhen.optim.quantized_kv import QuantizedMultiLatentAttention
+from rhen.optim.checkpoint import CheckpointedRecurrentCore
+from rhen.optim.mup import apply_mup_init, create_mup_config
+from rhen.optim.advanced_loops import (
     create_loop_bypass_router, create_cross_loop_attention, create_self_speculative_decoder
 )
-from optim.ring_mla import RingMLAAttention
+from rhen.optim.ring_mla import RingMLAAttention
 
 
 class RMSNorm(nn.Module):
@@ -1711,7 +1711,7 @@ def create_rhen_branch_mask(
     """
     Constructs a 2D Block-Causal Branch Mask for parallel multi-question evaluation over shared state.
     """
-    from optim.rhen_mask import Rhen2DBranchMask
+    from rhen.optim.rhen_mask import Rhen2DBranchMask
     return Rhen2DBranchMask.create_mask(state_len, branch_lens, device=device, dtype=dtype)
 
 
@@ -2674,7 +2674,7 @@ class EOSModel(PreTrainedModel):
         if self.training and getattr(self, "auto_apply_moe_balance", True) and not _in_autograd_backward():
             # Step-mode MoE balancing: apply the update recorded by the previous training
             # forward if no trainer applied it explicitly. A no-op in the default "forward" mode.
-            # Trainers that apply updates once per optimizer step (eos_research.train) turn this off.
+            # Trainers that apply updates once per optimizer step (rhen.research.train) turn this off.
             self.apply_moe_balance_updates()
 
         cache: Optional[EOSKVCache] = None

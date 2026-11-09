@@ -366,7 +366,8 @@ class TokenizerLoadTests(unittest.TestCase):
         # Resolved next to the module, so it works from any working directory.
         default = inspect.signature(EOSTokenizer.__init__).parameters["pretrained_model_name_or_path"].default
         self.assertEqual(default, tokenizer_module.DEFAULT_TOKENIZER_DIR)
-        self.assertTrue(default.endswith("EOS_Tokenizer"))
+        self.assertTrue(default.endswith("tokenizer_assets"))
+        self.assertTrue(os.path.isfile(os.path.join(default, "tokenizer.json")))
 
     def test_auto_tokenizer_is_called_without_remote_code(self):
         fake = mock.MagicMock()

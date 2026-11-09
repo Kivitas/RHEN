@@ -22,8 +22,8 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from eos_research import distributed as distmod
-from eos_research.manifest import write_json
+from rhen.research import distributed as distmod
+from rhen.research.manifest import write_json
 
 LATEST = "latest"
 

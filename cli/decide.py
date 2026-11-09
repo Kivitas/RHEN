@@ -18,9 +18,9 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-from eos_research import device as devmod
-from eos_research.checkpointing import load_model_from_checkpoint
-from eos_research.presets import preset_config
+from rhen.research import device as devmod
+from rhen.research.checkpointing import load_model_from_checkpoint
+from rhen.research.presets import preset_config
 try:
     from rhen.config import EOSConfig
     from rhen.model import EOSModel

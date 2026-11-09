@@ -16,7 +16,7 @@ import os
 import sys
 from typing import Optional, Sequence
 
-from eos_research.tasks import FAMILIES, RULES, SPLITS, write_benchmark
+from rhen.research.tasks import FAMILIES, RULES, SPLITS, write_benchmark
 
 
 def list_families() -> None:

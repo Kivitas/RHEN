@@ -1,10 +1,10 @@
 """Run a grid of training configurations, with repeated seeds, and tabulate the results.
 
-    python -m eos_research.sweep --config base.json --out runs/ablate_loops \\
+    python -m rhen.research.sweep --config base.json --out runs/ablate_loops \\
         --grid model_overrides.max_recurrent_loops=2,4,8 --grid order_consistency_coef=0,0.1 \\
         --seeds 0,1,2
 
-Every combination runs ``eos_research.train`` in its own process (so one failure does not stop
+Every combination runs ``rhen.research.train`` in its own process (so one failure does not stop
 the sweep) under ``<out>/<name>/seed<k>``. Finished runs are skipped when the sweep is
 restarted. ``summary.json`` and ``summary.csv`` report, per combination, the mean and standard
 deviation over seeds of every final evaluation metric.
@@ -23,7 +23,7 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Sequence, Tuple
 
-from eos_research.train import _flatten, _parse_value
+from rhen.research.train import _flatten, _parse_value
 
 
 def parse_grid(items: Sequence[str]) -> List[Tuple[str, List[Any]]]:
@@ -61,7 +61,7 @@ def run_sweep(config: str, out: str, grid: List[Tuple[str, List[Any]]], seeds: L
             run_dir = os.path.join(out, name, f"seed{seed}")
             final_path = os.path.join(run_dir, "final_metrics.json")
             if not os.path.exists(final_path):
-                cmd = [sys.executable, "-m", "eos_research.train", "--config", config,
+                cmd = [sys.executable, "-m", "rhen.research.train", "--config", config,
                        "--set", f"run_dir={json.dumps(run_dir)}", "--set", f"seed={seed}"]
                 for key, value in combo:
                     cmd += ["--set", f"{key}={json.dumps(value)}"]
@@ -99,7 +99,7 @@ def run_sweep(config: str, out: str, grid: List[Tuple[str, List[Any]]], seeds: L
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Grid/seed sweeps over eos_research.train.")
+    parser = argparse.ArgumentParser(description="Grid/seed sweeps over rhen.research.train.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--grid", action="append", default=[], metavar="KEY=V1,V2")

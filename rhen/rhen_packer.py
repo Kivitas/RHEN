@@ -368,7 +368,7 @@ class RhenPacker:
             branch_metas.append(meta)
 
         # 3. Create Attention Mask using Rhen2DBranchMask
-        from optim.rhen_mask import Rhen2DBranchMask
+        from rhen.optim.rhen_mask import Rhen2DBranchMask
         attn_mask = Rhen2DBranchMask.create_mask(
             state_length=state_len,
             branch_lengths=branch_lengths,

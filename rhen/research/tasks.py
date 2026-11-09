@@ -11,7 +11,7 @@ The splits are:
   confidence (a higher free energy) than on ``test``.
 
 Option order is shuffled per example (the label follows the shuffle), so a model cannot
-score well by preferring a position. ``eos_research.evaluate`` additionally measures how
+score well by preferring a position. ``rhen.research.evaluate`` additionally measures how
 much predictions change when the same options are presented in another order.
 """
 
@@ -22,7 +22,7 @@ import os
 import random
 from typing import Callable, Dict, List, Sequence
 
-from eos_research.data import DecisionExample, DecisionQuestion, write_decision_jsonl
+from rhen.research.data import DecisionExample, DecisionQuestion, write_decision_jsonl
 
 SPLITS = ("train", "val", "test", "test_ood")
 

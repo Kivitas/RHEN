@@ -17,7 +17,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from eos_research import device as devmod
+from rhen.research import device as devmod
 
 STRATEGIES = ("none", "ddp", "fsdp")
 

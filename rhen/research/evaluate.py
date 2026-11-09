@@ -1,6 +1,6 @@
 """Evaluation: language-model perplexity and Rhen decision quality.
 
-``python -m eos_research.evaluate --checkpoint runs/x/checkpoints/step_00001000 \\
+``python -m rhen.research.evaluate --checkpoint runs/x/checkpoints/step_00001000 \\
     --decision-dir data/decisions --lm-data data/corpus --out report.json``
 
 The decision report fits temperature scaling and a conformal threshold on the ``val`` split,
@@ -19,12 +19,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
-from eos_research import device as devmod
-from eos_research import distributed as distmod
-from eos_research.calibration import DecisionCalibration, calibrate_records, fit_decision_calibration
-from eos_research.data import DecisionExample, TokenWindows, lm_inputs, load_decision_jsonl
-from eos_research.manifest import write_json
-from eos_research.metrics import ood_detection, summarize
+from rhen.research import device as devmod
+from rhen.research import distributed as distmod
+from rhen.research.calibration import DecisionCalibration, calibrate_records, fit_decision_calibration
+from rhen.research.data import DecisionExample, TokenWindows, lm_inputs, load_decision_jsonl
+from rhen.research.manifest import write_json
+from rhen.research.metrics import ood_detection, summarize
 from rhen_loss import ORDER_FREE_PRIMITIVES, sample_option_permutation
 
 
@@ -44,7 +44,7 @@ def decision_records(
     order_check: bool = False,
     seed: int = 0,
 ) -> List[Dict[str, Any]]:
-    """One record per question (see ``eos_research.metrics``).
+    """One record per question (see ``rhen.research.metrics``).
 
     With ``order_check``, each example is evaluated a second time with the options of every
     order-free question reordered, and the record gets ``consistency_tv`` (total variation
@@ -211,7 +211,7 @@ def main(argv=None) -> None:
     parser.add_argument("--out", default=None, help="report path (default: <checkpoint>/eval_report.json)")
     args = parser.parse_args(argv)
 
-    from eos_research.checkpointing import load_model_from_checkpoint
+    from rhen.research.checkpointing import load_model_from_checkpoint
 
     device = devmod.resolve_device(args.device)
     policy = devmod.resolve_precision(args.precision, device)

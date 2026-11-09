@@ -1,6 +1,6 @@
 """Tokenize a text corpus into the flat token files used for language-model training.
 
-    python -m eos_research.prepare data/corpus raw/*.txt docs.jsonl --val-fraction 0.01
+    python -m rhen.research.prepare data/corpus raw/*.txt docs.jsonl --val-fraction 0.01
 
 Inputs may be ``.txt`` files (one document per file), directories (every ``.txt`` and
 ``.jsonl`` file inside, recursively) or ``.jsonl`` files with a ``text`` field per line.
@@ -14,7 +14,7 @@ import json
 import os
 from typing import Iterator, List
 
-from eos_research.data import prepare_token_corpus
+from rhen.research.data import prepare_token_corpus
 
 
 def iter_documents(paths: List[str], text_field: str = "text") -> Iterator[str]:
@@ -40,7 +40,7 @@ def iter_documents(paths: List[str], text_field: str = "text") -> Iterator[str]:
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Prepare a token corpus for eos_research.train.")
+    parser = argparse.ArgumentParser(description="Prepare a token corpus for rhen.research.train.")
     parser.add_argument("out_dir")
     parser.add_argument("inputs", nargs="+")
     parser.add_argument("--tokenizer", default=None)

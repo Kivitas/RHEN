@@ -2,8 +2,8 @@
 """Master verification battery runner for the EOS & Rhen test suites.
 
 Replaces the inline `python -c "subprocess.run(...)"` battery that used to be
-embedded in CI and the README. Every test_*.py file in the repository root is a
-suite, discovered from disk, so a new suite needs no registry edit. Each suite
+embedded in CI and the README. Every test_*.py file in this directory (tests/)
+is a suite, discovered from disk, so a new suite needs no registry edit. Each suite
 runs as an isolated subprocess and the battery fails if any suite exits
 non-zero. The runner adds:
 
@@ -57,11 +57,11 @@ SUITE_RUNTIMES: dict[str, float] = {
 
 FAST_BUDGET_SECONDS = 15.0
 
-ROOT = (
-    Path(__file__).resolve().parent.parent
-    if Path(__file__).resolve().parent.name == "tests"
-    else Path(__file__).resolve().parent
-)
+# Suites are discovered in this directory. Each suite runs from the repository
+# root (REPO_ROOT), which is also put on PYTHONPATH so rhen, optim, eos_research
+# and cli import the same way they do from a checkout.
+ROOT = Path(__file__).resolve().parent
+REPO_ROOT = ROOT.parent
 
 
 def _classify(runtime: float) -> str:
@@ -75,7 +75,7 @@ def _suite_class(suite: str) -> str:
 
 
 def discover_suites() -> list[str]:
-    """Every test_*.py in the repo root is a suite; subdirectories are not scanned.
+    """Every test_*.py in tests/ is a suite; subdirectories are not scanned.
 
     Registered suites come first, in SUITE_RUNTIMES order; unregistered suites
     follow, sorted by name. A registered name missing on disk is an error,
@@ -107,12 +107,15 @@ def select_suites(args: argparse.Namespace) -> list[str]:
 
 def run_suite(suite: str) -> tuple[bool, float]:
     start = time.perf_counter()
+    pythonpath = os.pathsep.join(
+        p for p in (str(REPO_ROOT), os.environ.get("PYTHONPATH", "")) if p
+    )
     proc = subprocess.run(
         [sys.executable, str(ROOT / suite)],
-        cwd=str(ROOT),
+        cwd=str(REPO_ROOT),
         # UTF-8 stdout: a suite that prints non-ASCII must not crash on a Windows
         # pipe (cp1252) and be reported as a failure.
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONPATH": pythonpath},
     )
     return proc.returncode == 0, time.perf_counter() - start
 
