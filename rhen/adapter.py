@@ -7,6 +7,7 @@ Allows developers to use Rhen's JEV-type non-autoregressive decision layer
 """
 
 import logging
+import weakref
 from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
@@ -19,6 +20,22 @@ except ImportError:
     from rhen_packer import PackedRhenSequence, get_rhen_packer
 
 logger = logging.getLogger(__name__)
+
+# Encoders for which the 4D-to-2D mask downgrade has already been logged. A WeakSet keeps the
+# warning to once per encoder instance rather than once per call.
+_MASK_DOWNGRADE_WARNED: "weakref.WeakSet[nn.Module]" = weakref.WeakSet()
+
+
+def _warn_mask_downgrade_once(encoder: nn.Module, first_exc: BaseException) -> None:
+    """Log that the packed 4D branch-isolation mask failed and the 2D padding mask is used."""
+    if encoder in _MASK_DOWNGRADE_WARNED:
+        return
+    _MASK_DOWNGRADE_WARNED.add(encoder)
+    logger.warning(
+        "Encoder %s failed on the packed 4D branch-isolation mask (%s: %s); retrying with the 2D "
+        "padding mask. Branch isolation may not hold for this encoder.",
+        type(encoder).__name__, type(first_exc).__name__, first_exc,
+    )
 
 
 class MockEncoderOutput:
@@ -149,13 +166,14 @@ class HuggingFaceEncoderAdapter(nn.Module):
             mask_2d = torch.ones_like(input_ids)
 
         # Run through the external encoder. The packed 4D block mask is tried first, because it
-        # carries the branch-isolation structure. Only a shape or type error moves on to the 2D
-        # padding mask. If that also fails, the original error is raised, chained. An encoder that
-        # does not accept an attention_mask keyword at all is called without one, and this is logged.
+        # carries the branch-isolation structure. Any failure there moves on once to the 2D
+        # padding mask, which is logged because branch isolation may not hold for that encoder.
+        # If the 2D attempt also fails, the original 4D error is raised, chained to the second.
+        # An encoder that does not accept an attention_mask keyword at all is called without one.
         if hasattr(self.encoder, "forward"):
             try:
                 enc_out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-            except (TypeError, ValueError) as first_exc:
+            except Exception as first_exc:
                 if isinstance(first_exc, TypeError) and "unexpected keyword argument" in str(first_exc) \
                         and "attention_mask" in str(first_exc):
                     logger.debug(
@@ -164,10 +182,11 @@ class HuggingFaceEncoderAdapter(nn.Module):
                     )
                     enc_out = self.encoder(input_ids=input_ids)
                 else:
+                    _warn_mask_downgrade_once(self.encoder, first_exc)
                     try:
                         enc_out = self.encoder(input_ids=input_ids, attention_mask=mask_2d)
-                    except (TypeError, ValueError) as second_exc:
-                        raise second_exc from first_exc
+                    except Exception as second_exc:
+                        raise first_exc from second_exc
 
             if hasattr(enc_out, "last_hidden_state"):
                 h = enc_out.last_hidden_state

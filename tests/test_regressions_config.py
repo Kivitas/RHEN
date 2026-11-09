@@ -56,7 +56,7 @@ ROOT = (
 )
 
 #: Removed no-op keys as (group class that used to own them, key). All 21 were
-#: deleted in RHEN 1.0.0; none may reappear as a field of its group.
+#: removed in the release after 1.0.0; none may reappear as a field of its group.
 REMOVED_KEYS = [
     (RecurrentLoopConfig, "enable_symplectic_loop"),
     (AttentionMLAConfig, "use_flash_attn"),
@@ -154,7 +154,7 @@ class TestDiffLambdaInit(unittest.TestCase):
         self.assertEqual(EOSConfig().diff_mla_lambda_init, 0.8)
 
     def test_removed_diff_attn_lambda_init_is_not_an_attribute(self):
-        with self.assertWarns(DeprecationWarning):
+        with self.assertWarns(FutureWarning):
             cfg = EOSConfig(diff_attn_lambda_init=0.5)
         self.assertFalse(hasattr(cfg, "diff_attn_lambda_init"))
         self.assertFalse(hasattr(cfg.attention, "diff_attn_lambda_init"))

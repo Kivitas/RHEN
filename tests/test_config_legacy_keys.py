@@ -1,14 +1,17 @@
-"""Removed no-op config keys: accepted, dropped, and reported with one DeprecationWarning.
+"""Removed no-op config keys: accepted, dropped, and reported with one FutureWarning.
 
-RHEN 1.0.0 deleted 21 config knobs that no code read. Configs, presets and saved
-checkpoints written before that still carry them, so every constructor must keep
-accepting them. Each call that receives removed keys drops them, emits exactly one
-DeprecationWarning naming them, and leaves no attribute behind.
+21 config knobs that no code read were removed in the release after 1.0.0. Configs,
+presets and saved checkpoints written before that still carry them, so every constructor
+must keep accepting them. Each call that receives removed keys drops them, emits exactly
+one FutureWarning naming them, and leaves no attribute behind. FutureWarning is shown
+under Python's default warning filters; DeprecationWarning is not, for library callers.
 """
 
 import glob
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 import warnings
@@ -61,13 +64,13 @@ LEGACY_VALUES = {key: value for _cls, key, value in LEGACY}
 
 
 def _capture(fn):
-    """Run ``fn`` and return (its result, the removed-key DeprecationWarnings it emitted)."""
+    """Run ``fn`` and return (its result, the removed-key FutureWarnings it emitted)."""
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
         result = fn()
     removed = [
         w for w in record
-        if issubclass(w.category, DeprecationWarning) and "removed no-op config key" in str(w.message)
+        if issubclass(w.category, FutureWarning) and "were removed and are ignored" in str(w.message)
     ]
     return result, removed
 
@@ -104,6 +107,29 @@ class TestLegacyKeysOnFlatConstructor(unittest.TestCase):
         cfg, _removed = _capture(lambda: EOSConfig(use_triton=False, rhen_num_slots=4, use_moe=False))
         self.assertEqual(cfg.rhen_num_slots, 4)
         self.assertFalse(cfg.use_moe)
+
+
+class TestLegacyKeysUnderDefaultFilters(unittest.TestCase):
+    def test_legacy_key_is_shown_without_any_warning_filter_setup(self):
+        """A library caller with Python's default filters must see the notice.
+
+        The check runs in a fresh interpreter with no -W flags and no PYTHONWARNINGS, so the
+        filters are the interpreter defaults, not the ones pytest or unittest installs.
+        """
+        code = (
+            "from rhen.config import EOSConfig\n"
+            "cfg = EOSConfig(use_triton=True, hidden_size=32)\n"
+            "assert cfg.hidden_size == 32\n"
+        )
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONWARNINGS"}
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (ROOT, env.get("PYTHONPATH", "")) if p)
+        proc = subprocess.run(
+            [sys.executable, "-c", code], cwd=ROOT, env=env,
+            capture_output=True, text=True, timeout=300,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("FutureWarning", proc.stderr)
+        self.assertIn("use_triton", proc.stderr)
 
 
 class TestLegacyKeysOnFromDict(unittest.TestCase):

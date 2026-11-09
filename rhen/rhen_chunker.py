@@ -351,7 +351,7 @@ class SemanticBoundaryChunker:
         if self.tokenizer is not None and hasattr(self.tokenizer, "encode"):
             try:
                 return len(self.tokenizer.encode(text))
-            except (RuntimeError, ValueError, TypeError) as exc:
+            except Exception as exc:  # HF tokenizers raise plain Exception subclasses too.
                 _log_tokenizer_fallback_once(exc)
         return max(1, int(len(text) / _CHARS_PER_TOKEN))
 
