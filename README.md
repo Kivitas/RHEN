@@ -58,6 +58,7 @@ print(f"Action: {result.choice_label} (Confidence: {result.confidence:.2%}, Abst
   - [Decision Duration Thresholding (TDT)](#decision-duration-thresholding-tdt)
   - [Hierarchical Choice Router (77+ Intents)](#hierarchical-choice-router-77-intents)
   - [OOD Regression Guard & Verification Lattice](#ood-regression-guard--verification-lattice)
+- [Predictive layer and forecast-aware decisions](#predictive-layer-and-forecast-aware-decisions)
 - [Installation & Quickstart](#installation--quickstart)
 - [Agent Framework Integrations](#agent-framework-integrations)
   - [1. LangChain / LangGraph Semantic Router](#1-langchain--langgraph-semantic-router)
@@ -469,6 +470,82 @@ Recent research (arXiv:2609.30266) demonstrated that LLM agents rewarded for tas
 | **OODRegressionGuard** | Held-out distribution regression monitor | Rejects updates that degrade held-out OOD accuracy beyond configured tolerance |
 | **EvidenceVerificationLattice** | Verification protocol | Seeded observer, permutation-invariance critic, and controlled baseline verifier |
 | **MultilingualDecisionRouter** | Cross-lingual decision transfer | Zero-shot routing across 10 languages (EN, DE, FR, ES, IT, NL, PT, HI, JA, KO) |
+
+---
+
+## Predictive layer and forecast-aware decisions
+
+RHEN can condition a decision on a forecast of the future. The pipeline is:
+
+```
+historical series ──► Forecaster (naive baseline or TimesFM 3.0) ──► Forecast (median path + quantiles)
+                                                                        │
+state text + forecast summary ──► RhenEngine.choice ──► probabilities ◄─┘
+                                                                        │
+                    DecisionPolicy: constraints · utility · confidence · forecast uncertainty · risk tier
+                                                                        │
+          EXECUTE ─────────────────────────► executor(option, decision)
+          NEEDS_APPROVAL ──► approve(id, approver) ──► executor(option, decision)
+          ABSTAIN / BLOCKED ──► not executed
+                                                                        │
+                       FeedbackLedger ◄── realized series: pinball loss, coverage, Brier
+```
+
+```python
+from rhen import (
+    RhenEngine, ForecastAwareDecider, DecisionPolicy, FeedbackLedger,
+    NaiveQuantileForecaster,
+)
+
+policy = DecisionPolicy(
+    utility=lambda option, features: {"restock_now": 1.0, "hold": 0.8}[option],
+    constraints=[("within_budget", lambda option, features: features["series"]["demand"]["median_end"] <= 200)],
+    min_confidence=0.6,
+    max_forecast_uncertainty=0.5,
+    approval_required_tiers=("high", "critical"),
+)
+ledger = FeedbackLedger()
+decider = ForecastAwareDecider(RhenEngine(), NaiveQuantileForecaster(), policy=policy, ledger=ledger)
+
+decision = decider.decide(
+    state="Warehouse: 40 units on hand, lead time 5 days.",
+    question="Should we restock now?",
+    options=["restock_now", "hold"],
+    series={"demand": weekly_demand},          # list of floats
+    horizon=6,
+    thresholds={"demand": 165.0},              # P(demand > 165 within horizon) feeds the risk tier
+)
+
+if decision.outcome.status.value == "NEEDS_APPROVAL":
+    decider.approve(decision.decision_id, approver="ops-lead")
+decider.execute(decision, lambda option, d: place_order(option))   # refuses anything not EXECUTE or approved
+
+ledger.record_outcome(decision.decision_id, {"demand": realized_demand})   # later, when outcomes are known
+print(ledger.calibration_report())
+```
+
+**Components** (module `rhen/forecasting.py` and `rhen/decision_pipeline.py`):
+
+| Component | Purpose |
+| :--- | :--- |
+| **`Forecast`** | Median path plus nine quantiles (levels 0.1 to 0.9) per step. `interval(0.8)`, `interval(0.5)`, `prob_exceeds(threshold, step)` and `uncertainty()` are computed from the quantile function by linear interpolation. |
+| **`NaiveQuantileForecaster`** | Dependency-free random-walk baseline and the default forecaster. Its median is the last value and its bands come from the empirical quantiles of one-step differences, scaled by the square root of the horizon. |
+| **`TimesFMForecaster`** | Adapter for Google TimesFM 3.0 through the `timesfm3` package. Requires `pip install "rhen[forecast]"`. See the licence note below. |
+| **`ForecastAwareDecider`** | Runs forecast, state augmentation, `RhenEngine.choice`, policy and ledger. `approve` and `execute` are the only paths to an action. |
+| **`DecisionPolicy`** | Deterministic gate. Returns `EXECUTE`, `NEEDS_APPROVAL`, `ABSTAIN` or `BLOCKED`, with reasons for each. It never executes anything. |
+| **`FeedbackLedger`** | Records decisions and outcomes. Reports pinball loss, interval coverage and Brier score against realized values. Round-trips through JSONL. |
+| **Error metrics** | `pinball_loss`, `interval_coverage`, `mase` and `brier_score`. |
+
+**Policy rules**, applied in order: no admissible option gives `BLOCKED`. Constraint predicates block options. Options are then ranked by `P(option) × utility(option, features)`. Confidence below `min_confidence`, forecast uncertainty above `max_forecast_uncertainty`, or the engine's own abstention gives `ABSTAIN`. A risk tier in `approval_required_tiers` gives `NEEDS_APPROVAL`. Otherwise the result is `EXECUTE`. The risk tier comes from `tier_fn` if you supply one, and otherwise from the largest breach probability against `tier_cutoffs` (0.2, 0.5, 0.8 by default).
+
+**TimesFM 3.0 licence.** The TimesFM 3.0 source code is Apache-2.0, but the 3.0 pretrained weights (`google/timesfm-3.0-pytorch`) are released under `timesfm-non-commercial-license-v1.0`. They are restricted to non-commercial, non-production use. RHEN is MIT-licensed. `TimesFMForecaster` therefore raises `ValueError` unless you pass `license_acknowledged=True`, and you should pass it only if your use is non-commercial and non-production. The example needs both `--timesfm` and `--accept-noncommercial-license`. Nothing in RHEN is licensed to override the weights' terms.
+
+**Limits.**
+- RHEN's decision scorer has no trained weights in this repository. The pipeline conditions the decision on the forecast and gates actions on forecast risk. It does not show that the forecast improves decision accuracy, and no benchmark is claimed.
+- The policy's rules are deterministic and tested. The utility function, constraints and thresholds are yours to set. The default utility is a constant 1.0, which ranks options by engine probability alone.
+- The breach probability for a series is the largest per-step probability. This is a lower bound on the probability of breaching at some step, because the joint distribution across steps is not modelled.
+- Quantile tails beyond the 0.1 and 0.9 levels are extrapolated, so exceedance probabilities far outside the band are approximate.
+- The ledger measures forecast calibration against realized values. It does not measure whether decisions were good.
 
 ---
 

@@ -144,6 +144,18 @@ from .tokenizer import (
     RHEN_SPECIAL_TOKENS,
 )
 
+# 13. Predictive Layer & Forecast-Aware Decisions
+from .forecasting import (
+    Forecast,
+    NaiveQuantileForecaster,
+    TimesFMForecaster,
+)
+from .decision_pipeline import (
+    ForecastAwareDecider,
+    DecisionPolicy,
+    FeedbackLedger,
+)
+
 __all__ = [
     "Noul", "NoulResult",
     "Choice", "ChoiceResult",
@@ -224,4 +236,10 @@ __all__ = [
     "get_tokenizer",
     "get_rhen_tokenizer",
     "RHEN_SPECIAL_TOKENS",
+    "Forecast",
+    "NaiveQuantileForecaster",
+    "TimesFMForecaster",
+    "ForecastAwareDecider",
+    "DecisionPolicy",
+    "FeedbackLedger",
 ]
