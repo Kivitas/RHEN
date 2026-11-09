@@ -8,6 +8,7 @@ non-autoregressive latent pointer readout.
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union, Tuple
 import torch
@@ -40,6 +41,24 @@ except ImportError:
         LATENT_SLOT_TOKEN,
         get_tokenizer,
     )
+
+logger = logging.getLogger(__name__)
+
+# Degraded paths already reported in this process. Each site logs its WARNING once, not for
+# every packed sequence.
+_FALLBACKS_LOGGED = set()
+
+
+def _warn_fallback_once(site: str, exc: BaseException, fallback: str) -> None:
+    """Log a WARNING the first time ``site`` takes its fallback in this process."""
+    if site in _FALLBACKS_LOGGED:
+        return
+    _FALLBACKS_LOGGED.add(site)
+    logger.warning(
+        "%s failed with %s: %s; falling back to %s. Further occurrences are not logged.",
+        site, type(exc).__name__, exc, fallback,
+    )
+
 
 DELIMITER_REPLACEMENTS = {
     "<|state|>": "<¦state¦>",
@@ -342,7 +361,10 @@ class RhenPacker:
             for line, d in zip(lines, line_depths):
                 toks = self.tokenizer.encode(line)
                 state_depths.extend([d] * len(toks))
-        except Exception:
+        except (ValueError, TypeError) as exc:
+            _warn_fallback_once(
+                "RhenPacker._pack_sequence (state depths)", exc, "zero depths for the state prefix",
+            )
             state_depths = []
 
         if len(state_depths) < state_len:
@@ -381,7 +403,11 @@ class RhenPacker:
         if latent_slot_id is None:
             try:
                 latent_slot_id = self.tokenizer.token_to_id(LATENT_SLOT_TOKEN)
-            except Exception:
+            except (AttributeError, TypeError) as exc:
+                _warn_fallback_once(
+                    "RhenPacker._pack_sequence (latent slot lookup)", exc,
+                    "no latent slot indices",
+                )
                 latent_slot_id = None
 
         latent_slot_indices: Optional[List[int]] = None
@@ -632,7 +658,11 @@ class RhenPacker:
             for line, d in zip(lines, line_depths):
                 toks = self.tokenizer.encode(line)
                 state_depths.extend([d] * len(toks))
-        except Exception:
+        except (ValueError, TypeError) as exc:
+            _warn_fallback_once(
+                "RhenPacker.build_speculative_tree_pack (state depths)", exc,
+                "zero depths for the state prefix",
+            )
             state_depths = []
 
         if len(state_depths) < state_len:
@@ -753,7 +783,11 @@ class RhenPacker:
         if latent_slot_id is None:
             try:
                 latent_slot_id = self.tokenizer.token_to_id(LATENT_SLOT_TOKEN)
-            except Exception:
+            except (AttributeError, TypeError) as exc:
+                _warn_fallback_once(
+                    "RhenPacker.build_speculative_tree_pack (latent slot lookup)", exc,
+                    "no latent slot indices",
+                )
                 latent_slot_id = None
 
         latent_slot_indices: Optional[List[int]] = None

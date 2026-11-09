@@ -15,6 +15,7 @@ so an interrupted save never becomes the resume point.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import shutil
@@ -26,6 +27,8 @@ from rhen.research import distributed as distmod
 from rhen.research.manifest import write_json
 
 LATEST = "latest"
+
+logger = logging.getLogger(__name__)
 
 
 def checkpoint_dir(run_dir: str, step: int) -> str:
@@ -156,7 +159,14 @@ def load_checkpoint(
     scaler: Any,
     ctx: distmod.DistributedContext,
 ) -> Dict[str, Any]:
-    """Restore everything saved by ``save_checkpoint``; returns the trainer state."""
+    """Restore everything saved by ``save_checkpoint``; returns the trainer state.
+
+    Loading a checkpoint runs deserialization, so checkpoints must come from a trusted
+    source: a crafted ``.pt`` file can execute code when it is loaded. ``model.pt`` and
+    ``optimizers.pt`` are read with ``weights_only=True``. ``rng_rank<k>.pt`` is read with
+    ``weights_only=False`` because it holds a NumPy RNG state, and a WARNING is logged
+    each time that happens.
+    """
     if distmod.is_fsdp(wrapped):
         from torch.distributed.fsdp import FullStateDictConfig, StateDictType
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -168,7 +178,7 @@ def load_checkpoint(
     else:
         load_model_weights(model, path)
 
-    extra = torch.load(os.path.join(path, "optimizers.pt"), map_location="cpu", weights_only=False)
+    extra = torch.load(os.path.join(path, "optimizers.pt"), map_location="cpu", weights_only=True)
     for opt, opt_state in zip(optimizers, extra["optimizers"]):
         if distmod.is_fsdp(wrapped):
             from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -182,6 +192,11 @@ def load_checkpoint(
 
     rng_path = os.path.join(path, f"rng_rank{ctx.rank}.pt")
     if os.path.exists(rng_path):
+        logger.warning(
+            "Loading %s with weights_only=False (NumPy RNG state needs full unpickling); "
+            "only resume from checkpoints produced by a trusted run",
+            rng_path,
+        )
         _set_rng_state(torch.load(rng_path, map_location="cpu", weights_only=False))
     with open(os.path.join(path, "trainer_state.json"), "r", encoding="utf-8") as fh:
         return json.load(fh)

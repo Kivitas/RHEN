@@ -33,6 +33,7 @@ This module provides four cooperating pieces:
 """
 
 import hashlib
+import logging
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -40,6 +41,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------------------
 # Defaults
@@ -58,6 +61,23 @@ DEFAULT_TEMPERATURE: float = 1.0
 #: BPE merges on English text average ~4 characters/token; this is only used to
 #: enforce the window budget, never for the decision itself.
 _CHARS_PER_TOKEN: float = 4.0
+
+#: Set once the tokenizer-failure WARNING has been logged in this process.
+_TOKENIZER_FALLBACK_LOGGED: bool = False
+
+
+def _log_tokenizer_fallback_once(exc: BaseException) -> None:
+    """Log that the tokenizer failed and a character estimate is used (once per process)."""
+    global _TOKENIZER_FALLBACK_LOGGED
+    if _TOKENIZER_FALLBACK_LOGGED:
+        return
+    _TOKENIZER_FALLBACK_LOGGED = True
+    logger.warning(
+        "Tokenizer encode failed with %s: %s; SemanticBoundaryChunker.count_tokens is using a "
+        "character-count estimate (%.0f chars/token) for the window budget. "
+        "Further occurrences are not logged.",
+        type(exc).__name__, exc, _CHARS_PER_TOKEN,
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -331,8 +351,8 @@ class SemanticBoundaryChunker:
         if self.tokenizer is not None and hasattr(self.tokenizer, "encode"):
             try:
                 return len(self.tokenizer.encode(text))
-            except Exception:
-                pass
+            except (RuntimeError, ValueError, TypeError) as exc:
+                _log_tokenizer_fallback_once(exc)
         return max(1, int(len(text) / _CHARS_PER_TOKEN))
 
     def _fits(self, text: str) -> bool:

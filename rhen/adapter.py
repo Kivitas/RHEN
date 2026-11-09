@@ -6,6 +6,7 @@ Allows developers to use Rhen's JEV-type non-autoregressive decision layer
 (BERT, RoBERTa, DeBERTa, LLaMA, Mistral, Qwen, Gemma, T5 encoder) or custom PyTorch encoder.
 """
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
@@ -16,6 +17,8 @@ try:
 except ImportError:
     from model import MultiHeadRhenPointerHead
     from rhen_packer import PackedRhenSequence, get_rhen_packer
+
+logger = logging.getLogger(__name__)
 
 
 class MockEncoderOutput:
@@ -145,16 +148,21 @@ class HuggingFaceEncoderAdapter(nn.Module):
         if (mask_2d == 0).all():
             mask_2d = torch.ones_like(input_ids)
 
-        # Run through the external encoder
+        # Run through the external encoder. One deterministic call with the 2D padding mask.
+        # Only an encoder that does not accept an attention_mask keyword at all gets a retry
+        # without it; every other exception (device mismatch, shape error, ...) propagates.
         if hasattr(self.encoder, "forward"):
             try:
-                enc_out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-            except Exception:
-                try:
-                    # Many standard HuggingFace transformers expect a 2D attention mask
-                    enc_out = self.encoder(input_ids=input_ids, attention_mask=mask_2d)
-                except Exception:
-                    enc_out = self.encoder(input_ids=input_ids)
+                enc_out = self.encoder(input_ids=input_ids, attention_mask=mask_2d)
+            except TypeError as exc:
+                msg = str(exc)
+                if "unexpected keyword argument" not in msg or "attention_mask" not in msg:
+                    raise
+                logger.debug(
+                    "Encoder %s does not accept attention_mask (%s); calling without it",
+                    type(self.encoder).__name__, msg,
+                )
+                enc_out = self.encoder(input_ids=input_ids)
 
             if hasattr(enc_out, "last_hidden_state"):
                 h = enc_out.last_hidden_state
