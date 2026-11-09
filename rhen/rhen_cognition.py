@@ -6,11 +6,11 @@ specific, documented weakness in the current competitive field (JEV / Open-Jev /
 Laya / TypeSafe):
 
 1. :class:`RLCDOptimizer` -- Reinforcement Learning for Calibrated Decisions.
-   Laya's central claim is that its "guiding brain" is reinforcement learning
-   (PPO/RLCD), not an embedding model. Rhen previously shipped supervised
-   objectives only (DDPO + conformal). This adds a group-relative policy
-   gradient (GRPO-style) over the Rhen decision head with a *calibration-aware
-   reward*, so confidence is optimised jointly with correctness.
+   Laya's model card describes RLCD-style calibration. Rhen previously shipped
+   supervised objectives only (DDPO + conformal). This adds a group-relative
+   policy gradient (GRPO-style) over the Rhen decision head with a
+   *calibration-aware reward*, so confidence is optimised jointly with
+   correctness.
 
 2. :class:`DurationThresholdingHead` -- Decision Duration Thresholding (TDT).
    NVIDIA's parakeet-tdt predicts, alongside each output, *how many* outputs to
@@ -20,10 +20,10 @@ Laya / TypeSafe):
    recurrent depth.
 
 3. :class:`HierarchicalChoiceRouter` -- two-level coarse-to-fine choice.
-   Laya documents its own headline failure: on Banking77 (77 labels) it scores
-   0.425 against Jev's 0.870, because a flat 192-256 token head budget leaves
-   ~3-4 tokens per candidate. This router clusters K options into G groups,
-   selects the group in one pass, then discriminates inside it.
+   Laya's published Banking77 figure is 0.425 on 77 labels, against Jev's 0.870
+   on 72 labels; the label sets differ, so the two are not directly comparable.
+   This router clusters K options into G groups by text similarity, selects the
+   group in one pass using a medoid label, then discriminates inside it.
 
 4. :class:`OODRegressionGuard` -- a regression gate on out-of-distribution
    optimal-action accuracy. Open-Jev openly reports that "Wiki OOD optimal-action
@@ -35,8 +35,10 @@ Laya / TypeSafe):
    loftwah JEV framework's insistence on "enough evidence to distinguish an
    improvement from a prettier screenshot".
 
-6. :class:`MultilingualDecisionRouter` -- script/language detection and routing,
-   matching Laya's 100+ language coverage claim without an LLM call.
+6. :class:`MultilingualDecisionRouter` -- script/language detection and routing.
+   A heuristic over about 13 language tags (stopword and script rules), with no
+   LLM call. It is not equivalent to Laya's 100+ language coverage and has no
+   accuracy evaluation in this repo.
 
 All components are pure-PyTorch and CPU-safe; none require network access or
 external model weights. They are standalone utilities: nothing here is wired into
@@ -114,8 +116,9 @@ class RLCDOptimizer:
     lightweight, which matters for an EOSModel (see EOSModel.count_parameters()) intended to run on
     commodity CPUs.
 
-    Reference: Laya / ConvAI (arXiv:2503.23303, arXiv:2510.01237) and the RLCD
-    description in the Open-Jev README.
+    References (not verified by the author of this comment): Laya / ConvAI
+    arXiv:2503.23303 and arXiv:2510.01237, and the RLCD description in the
+    Open-Jev README.
     """
 
     def __init__(
@@ -357,23 +360,105 @@ class DurationThresholdingHead(torch.nn.Module):
 # ===========================================================================
 
 
+def _char_trigrams(text: Any) -> frozenset:
+    """Set of lowercased character trigrams, padded so every string has at least one."""
+    padded = f"  {' '.join(str(text).lower().split())} "
+    return frozenset(padded[i:i + 3] for i in range(len(padded) - 2))
+
+
+def _jaccard(a: frozenset, b: frozenset) -> float:
+    """Jaccard similarity of two trigram sets, in [0, 1]."""
+    union = len(a | b)
+    return len(a & b) / union if union else 1.0
+
+
+def _balanced_clusters(
+    options: Sequence[Any], num_groups: int, max_iterations: int = 10
+) -> Tuple[List[List[int]], List[int]]:
+    """
+    Deterministic, balanced k-medoids over character-trigram similarity.
+
+    Returns ``(clusters, medoids)``. ``clusters[j]`` holds the sorted option
+    indices of group ``j`` and ``medoids[j]`` is the member of that group with
+    the highest total similarity to the other members. Steps:
+
+    1. Seed ``G`` medoids by farthest-point traversal from option 0 (ties go to
+       the lower index).
+    2. Assign options to medoids in order of decreasing similarity, subject to a
+       capacity of ``ceil(K / G)`` per group. Each medoid is pinned to its own
+       group first, so no group is ever empty and no group exceeds capacity.
+    3. Recompute each group's medoid and reassign, until stable or
+       ``max_iterations`` is reached.
+    """
+    k = len(options)
+    if k == 0:
+        return [], []
+    g = min(max(1, int(num_groups)), k)
+    cap = -(-k // g)  # ceil(k / g)
+    feats = [_char_trigrams(o) for o in options]
+
+    # 1. Farthest-point seeding.
+    seeds = [0]
+    nearest = [_jaccard(feats[i], feats[0]) for i in range(k)]
+    while len(seeds) < g:
+        chosen = set(seeds)
+        nxt = min((i for i in range(k) if i not in chosen), key=lambda i: (nearest[i], i))
+        seeds.append(nxt)
+        nearest = [max(nearest[i], _jaccard(feats[i], feats[nxt])) for i in range(k)]
+
+    def assign(medoids: List[int]) -> List[List[int]]:
+        clusters: List[List[int]] = [[m] for m in medoids]
+        owner = [-1] * k
+        for j, m in enumerate(medoids):
+            owner[m] = j
+        pairs = sorted(
+            (-_jaccard(feats[i], feats[m]), i, j)
+            for j, m in enumerate(medoids)
+            for i in range(k)
+        )
+        for _neg_sim, i, j in pairs:
+            if owner[i] == -1 and len(clusters[j]) < cap:
+                clusters[j].append(i)
+                owner[i] = j
+        return [sorted(c) for c in clusters]
+
+    def medoid_of(cluster: List[int]) -> int:
+        return max(
+            cluster,
+            key=lambda m: (sum(_jaccard(feats[m], feats[n]) for n in cluster), -m),
+        )
+
+    # 2-3. Assign, then refine medoids until the partition is stable.
+    medoids = [medoid_of(c) for c in assign(seeds)]
+    clusters = assign(medoids)
+    for _ in range(max_iterations):
+        refined = [medoid_of(c) for c in clusters]
+        if refined == medoids:
+            break
+        medoids = refined
+        clusters = assign(medoids)
+    return clusters, [medoid_of(c) for c in clusters]
+
+
 class HierarchicalChoiceRouter:
     """
     Two-level choice decomposition for large option sets.
 
-    Laya's own write-up records the failure this addresses: on Banking77
-    (77 labels) Laya scores 0.425 against Jev's 0.870, attributing it to a
-    "192-256 token ``head_max_len`` budget, leaving only ~3-4 tokens per
-    candidate at 77 options", and recommends "keep choice schemas under 20
-    options, or use a two-step coarse-to-fine hierarchy".
+    Motivation, as reported by the Laya authors (figures not verified by the
+    author of this comment): Laya reports 0.425 on Banking77 with 77 labels,
+    against Jev's 0.870 on 72 labels, and attributes the gap to a flat head
+    token budget that leaves only a few tokens per candidate at 77 options. It
+    suggests a coarse-to-fine hierarchy for large option sets.
 
-    This router implements that recommendation. Options are partitioned into
-    ``num_groups`` clusters; group selection costs one pass over ``G`` options,
-    and discrimination costs one pass over only the members of the winning
-    group. Scored options therefore drop from ``K`` to ``G + |group|``, which is
-    what relieves the per-candidate token budget.
+    This router implements that coarse-to-fine approach. Options are partitioned
+    into ``num_groups`` clusters by text similarity; group selection costs one
+    pass over ``G`` options (each group is represented by its medoid), and
+    discrimination costs one pass over only the members of the winning group.
+    Scored options therefore drop from ``K`` to ``G + |group|``, with
+    ``|group| <= ceil(K / G)``.
 
-    Reference: https://laya.convaiinnovations.com/ (Banking77 discussion).
+    Reference (not verified by the author of this comment):
+    https://laya.convaiinnovations.com/ (Banking77 discussion).
     """
 
     def __init__(
@@ -388,25 +473,18 @@ class HierarchicalChoiceRouter:
 
     def build_clusters(self, options: Sequence[str]) -> List[List[int]]:
         """
-        Deterministically partition option indices into ``num_groups`` buckets.
+        Deterministically partition option indices into ``num_groups`` clusters.
 
-        Contiguous chunking (rather than learned clustering) keeps the partition
-        stable across calls and therefore auditable -- important when the router
-        sits in front of a cryptographic action ledger. The remainder is absorbed
-        by the leading buckets so every option stays reachable.
+        Partitioning is by text similarity (character-trigram Jaccard), not by
+        position, so related options share a group wherever they sit in the
+        list. Clusters are balanced to at most ``ceil(K / G)`` members, which
+        bounds the number of options scored in the second pass, and every
+        cluster is non-empty. The procedure is dependency-free and has no
+        randomness, so the same option list always yields the same partition,
+        which keeps the routing auditable.
         """
-        k = len(options)
-        if k == 0:
-            return []
-        g = min(self.num_groups, k)
-        base, extra = divmod(k, g)
-        clusters: List[List[int]] = []
-        start = 0
-        for i in range(g):
-            size = base + (1 if i < extra else 0)
-            clusters.append(list(range(start, start + size)))
-            start += size
-        return [c for c in clusters if c]
+        clusters, _ = _balanced_clusters(options, self.num_groups)
+        return clusters
 
     def should_decompose(self, num_options: int) -> bool:
         """Hierarchical routing only pays off beyond the flat-budget threshold."""
@@ -459,9 +537,11 @@ class HierarchicalChoiceRouter:
                 "scores": scores,
             }
 
-        # Level 1: score the groups.
-        clusters = self.build_clusters(options)
-        group_labels = [" | ".join(options[i] for i in c[:3]) for c in clusters]
+        # Level 1: score the groups. Each group is represented by its medoid
+        # option, the member most similar to the rest of its group, so the
+        # label reflects the whole group rather than its first few members.
+        clusters, medoids = _balanced_clusters(options, self.num_groups)
+        group_labels = [options[m] for m in medoids]
         group_scores = list(scorer(group_labels))
         best_group = int(max(range(len(clusters)), key=lambda i: group_scores[i]))
 
@@ -775,11 +855,11 @@ class MultilingualDecisionRouter:
     """
     Script/language detection and decision routing, without an LLM call.
 
-    Laya's headline differentiator is "multilingual routing across 100+ languages"
-    performed by a bidirectional encoder. Rhen does not need a second encoder:
-    Unicode script analysis plus a compact stopword signature identifies the
-    language in microseconds and routes the decision to the appropriate
-    calibration profile.
+    This is a heuristic over about 13 language tags (de, fr, pt, es, it, nl, en,
+    hi, ja, ko, ru, ar, zh) plus script-family tags for other scripts. Unicode
+    script analysis and a compact stopword signature select the language and
+    the matching calibration profile. It has no accuracy evaluation in this
+    repo and is not equivalent to Laya's 100+ language coverage claim.
 
     Why it matters for decisions: conformal sets and temperatures fitted on
     English do not transfer. Each detected language selects its own calibration

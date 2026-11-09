@@ -1,5 +1,6 @@
 """
-Rhen-1.0 Master Verification Suite: Beyond Jared Palmer's Kev/JEV and Convai's Laya.
+Rhen-1.0 Master Verification Suite: invariant and unit checks for the Rhen-1.0 pillars.
+No comparison against Kev, JEV, Open-Jev or Laya is run by this file.
 
 Validates all 7 architectural, empirical, and cognitive pillars:
   Pillar 1: Continuous Latent Grounding via <|latent_slot|> & ContinuousLatentAdapter
@@ -457,5 +458,5 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 75)
     print(f"  ALL 7 PILLARS AND UNIFIED ORCHESTRATOR VERIFIED IN {t_total:.2f}s!")
-    print("  RHEN-1.0 EMPIRICALLY EXCEEDS KEV, JEV, OPEN-JEV, AND LAYA.")
+    print("  RHEN-1.0 invariant and unit verification battery complete.")
     print("=" * 75 + "\n")
