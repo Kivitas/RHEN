@@ -119,7 +119,10 @@ def main() -> None:
     lower, upper = forecast.interval(0.8)
     print(f"Median path: {[round(v, 1) for v in forecast.mean]}")
     print(f"80% band at horizon end: [{lower[-1]:.1f}, {upper[-1]:.1f}]")
-    print(f"P(demand > {THRESHOLDS['demand']:g} within horizon) = {decision.features['max_breach_probability']:.3f}")
+    lower_bound = decision.features["breach_prob_step_max_lower"]
+    upper_bound = decision.features["breach_prob_any_step_upper"]
+    print(f"P(demand > {THRESHOLDS['demand']:g} at some step) is between {lower_bound:.3f} "
+          f"(lower bound, max single step) and {upper_bound:.3f} (upper bound, union bound)")
     print("Choice probabilities: " + ", ".join(f"{k}={v:.3f}" for k, v in decision.choice.probabilities.items()))
 
     print("\n--- 2. Policy gate ---")
@@ -149,7 +152,7 @@ def main() -> None:
     series = report["series"]["demand"]
     print(f"Pinball loss: {series['mean_pinball_loss']:.2f}  "
           f"80% coverage: {series['coverage_80']:.2f} (target 0.80)  "
-          f"Brier: {series['mean_brier']:.3f}")
+          f"Brier (under lower / upper bound): {series['mean_brier_lower']:.3f} / {series['mean_brier_upper']:.3f}")
 
 
 if __name__ == "__main__":

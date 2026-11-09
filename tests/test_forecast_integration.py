@@ -79,7 +79,13 @@ class _StubEngine:
 
 
 def _features(breach=None, uncertainty=0.1):
-    return {"series": {}, "max_breach_probability": breach, "uncertainty": uncertainty}
+    # One breach figure stands for both bounds here; the tier is gated on the upper bound.
+    return {
+        "series": {},
+        "breach_prob_step_max_lower": breach,
+        "breach_prob_any_step_upper": breach,
+        "uncertainty": uncertainty,
+    }
 
 
 def _make_decision(status, option="restock", breach=None, thresholds=None, forecast=None):
@@ -137,7 +143,44 @@ class TestForecastMath(unittest.TestCase):
         fc = Forecast("demand", 2, [14.0, 24.0], [ROW, row2])
         self.assertAlmostEqual(fc.prob_exceeds(25.0, step=0), 0.0)
         self.assertAlmostEqual(fc.prob_exceeds(25.0, step=1), 0.4)
+        # Without a step, prob_exceeds is the lower bound: the largest single-step probability.
         self.assertAlmostEqual(fc.prob_exceeds(25.0), 0.4)
+        self.assertEqual(fc.step_exceedance_probs(25.0), [fc.prob_exceeds(25.0, step=0), fc.prob_exceeds(25.0, step=1)])
+
+    def test_tied_lower_quantiles_resolve_to_the_highest_tied_level(self):
+        # Quantiles 5 at levels 0.1, 0.2, 0.3. F(5) is the highest tied level, 0.3, so P(X > 5) = 0.7.
+        fc = Forecast("demand", 1, [6.0], [[5, 5, 5, 6, 7, 8, 9, 10, 11]])
+        self.assertAlmostEqual(fc.prob_exceeds(5.0, step=0), 0.70)
+        # Strictly inside the segment from 5 (level 0.3) to 6 (level 0.4).
+        self.assertAlmostEqual(fc.prob_exceeds(5.5, step=0), 0.65)
+
+    def test_tied_interior_and_upper_quantiles_resolve_to_the_highest_tied_level(self):
+        interior = Forecast("x", 1, [3.0], [[1, 2, 3, 3, 3, 4, 5, 6, 7]])
+        self.assertAlmostEqual(interior.prob_exceeds(3.0, step=0), 0.50)  # F(3) = 0.5
+        upper = Forecast("x", 1, [9.0], [[1, 2, 3, 4, 5, 6, 9, 9, 9]])
+        self.assertAlmostEqual(upper.prob_exceeds(9.0, step=0), 0.10)  # F(9) = 0.9
+
+    def test_constant_series_threshold_at_the_constant_is_a_point_mass(self):
+        # Every quantile equals 5, so the forecast is the point 5. P(X > 5) = 0 by the point-mass
+        # rule: no tail mass is added above a point with no width. Below the point it is 1.
+        (fc,) = NaiveQuantileForecaster().predict([[5.0] * 10], 3)
+        self.assertEqual(fc.quantiles[0], [5.0] * 9)
+        self.assertEqual(fc.prob_exceeds(5.0, step=0), 0.0)
+        self.assertEqual(fc.prob_exceeds(4.0, step=0), 1.0)
+        self.assertEqual(fc.prob_exceeds(6.0, step=0), 0.0)
+
+    def test_threshold_below_all_quantiles_is_one_and_above_all_is_zero(self):
+        self.assertEqual(self.fc.prob_exceeds(0.0, step=0), 1.0)
+        self.assertEqual(self.fc.prob_exceeds(100.0, step=0), 0.0)
+        tied = Forecast("x", 1, [6.0], [[5, 5, 5, 6, 7, 8, 9, 10, 11]])
+        self.assertEqual(tied.prob_exceeds(4.0, step=0), 1.0)
+        self.assertEqual(tied.prob_exceeds(12.0, step=0), 0.0)
+
+    def test_central_interval_levels_supported_range_is_zero_to_point_eight(self):
+        self.fc.interval(0.8)  # the widest supported level
+        self.fc.interval(0.01)
+        with self.assertRaises(ValueError):
+            self.fc.interval(0.81)
 
     def test_degenerate_forecast_is_a_point_mass(self):
         fc = Forecast("flat", 1, [110.0], [[110.0] * 9])
@@ -338,6 +381,35 @@ class TestDecisionPolicy(unittest.TestCase):
         self.assertEqual(out.option, "b")  # 0.4 * 3 = 1.2 beats 0.6 * 1 = 0.6
         self.assertAlmostEqual(out.expected_utility, 1.2)
 
+    def test_negative_utility_is_rejected(self):
+        # Without the guard, a = 0.9 * -1 = -0.9 and b = 0.1 * -0.5 = -0.05 would pick b.
+        utilities = {"a": -1.0, "b": -0.5}
+        policy = DecisionPolicy(utility=lambda o, f: utilities[o])
+        with self.assertRaises(ValueError) as ctx:
+            policy.evaluate(_choice({"a": 0.9, "b": 0.1}), _features())
+        message = str(ctx.exception)
+        self.assertIn("non-negative", message)
+        self.assertIn("not a full cost model", message)
+
+    def test_negative_utility_on_a_blocked_option_is_not_evaluated(self):
+        policy = DecisionPolicy(
+            utility=lambda o, f: -1.0 if o == "a" else 1.0,
+            constraints=[("not_a", lambda o, f: o != "a")],
+        )
+        out = policy.evaluate(_choice({"a": 0.8, "b": 0.2}), _features())
+        self.assertIs(out.status, PolicyStatus.EXECUTE)
+        self.assertEqual(out.option, "b")
+
+    def test_risk_tier_is_gated_on_the_upper_bound_not_the_lower(self):
+        policy = DecisionPolicy(utility=lambda o, f: 1.0)
+        # Lower bound 0.19 alone would be "low"; the upper bound 0.38 gives "medium".
+        features = {"series": {}, "breach_prob_step_max_lower": 0.19, "breach_prob_any_step_upper": 0.38,
+                    "uncertainty": 0.1}
+        tier, reason = policy.risk_tier("a", features)
+        self.assertEqual(tier, "medium")
+        self.assertIn("upper bound 0.380", reason)
+        self.assertIn("lower bound", reason)
+
     def test_tier_fn_can_force_approval_without_breach_threshold(self):
         policy = DecisionPolicy(utility=lambda o, f: 1.0, tier_fn=lambda o, f: "high")
         out = policy.evaluate(_choice({"a": 0.9, "b": 0.1}), _features())
@@ -380,7 +452,12 @@ class TestDecideAndApprovalGate(unittest.TestCase):
         second = self._decide(decider, {"demand": 1000.0})
         self.assertEqual(first.augmented_state, second.augmented_state)
         self.assertIn("Forecast summary (method=naive_random_walk, horizon=4)", first.augmented_state)
-        self.assertIn("P(demand > 1000 within horizon) = 0.000", first.augmented_state)
+        self.assertIn(
+            "P(demand > 1000 at some step) is between 0.000 (max single step, lower bound) "
+            "and 0.000 (union bound, upper bound)",
+            first.augmented_state,
+        )
+        self.assertNotIn("within horizon", first.augmented_state)
         self.assertEqual(engine.calls[0]["state"], first.augmented_state)
         self.assertEqual(engine.calls[0]["options"], ["restock", "hold"])
         self.assertEqual(first.forecasts["demand"].horizon, 4)
@@ -426,6 +503,70 @@ class TestDecideAndApprovalGate(unittest.TestCase):
         decider.execute(decision, executor)
         executor.assert_called_once()
         self.assertEqual(ledger.get(decision.decision_id).executed_option, "restock")
+
+    def test_setting_the_approval_attribute_does_not_authorise_execution(self):
+        decider, _ = self._decider(_choice({"restock": 0.8, "hold": 0.2}))
+        decision = self._decide(decider, {"demand": 0.0})
+        self.assertIs(decision.outcome.status, PolicyStatus.NEEDS_APPROVAL)
+        forged = {"approver": "attacker", "approved_at": "2026-01-01T00:00:00+00:00"}
+        # approval is a read-only view of the decider's registry, so assignment is refused.
+        with self.assertRaises(AttributeError):
+            decision.approval = forged
+        # Writing the instance dict directly does not shadow the read-only property either.
+        decision.__dict__["approval"] = forged
+        self.assertIsNone(decision.approval)
+        executor = mock.Mock()
+        with self.assertRaises(DecisionGateError):
+            decider.execute(decision, executor)
+        executor.assert_not_called()
+
+    def test_approve_writes_the_registry_and_execute_reads_it(self):
+        decider, _ = self._decider(_choice({"restock": 0.8, "hold": 0.2}))
+        decision = self._decide(decider, {"demand": 0.0})
+        approval = decider.approve(decision.decision_id, "ops-lead")
+        self.assertEqual(decision.approval, approval)
+        self.assertEqual(set(decision.approval), {"approver", "approved_at"})
+        # The view is a copy: editing it does not change what execute() will check.
+        decision.approval["approver"] = "someone-else"
+        self.assertEqual(decision.approval["approver"], "ops-lead")
+        executor = mock.Mock(return_value="ok")
+        self.assertEqual(decider.execute(decision, executor), "ok")
+        executor.assert_called_once()
+
+    def test_breach_bounds_are_reported_and_the_tier_uses_the_upper_bound(self):
+        # Per-step breach probability is 0.19 at every step (1 - F(17.1) with F from ROW).
+        class FixedForecaster:
+            name = "fixed"
+
+            def __init__(self, forecast):
+                self.forecast = forecast
+
+            def predict(self, series_list, horizon):
+                return [self.forecast for _ in series_list]
+
+        policy = DecisionPolicy(utility=lambda o, f: 1.0, max_forecast_uncertainty=math.inf)
+        ten_steps = Forecast("x", 10, [14.0] * 10, [ROW] * 10)
+        engine = _StubEngine(_choice({"restock": 0.8, "hold": 0.2}))
+        decider = ForecastAwareDecider(engine, FixedForecaster(ten_steps), policy=policy)
+        decision = decider.decide("s", "q", ["restock", "hold"], {"x": [12.0, 13.0, 14.0]}, 10,
+                                  thresholds={"x": 17.1})
+        self.assertAlmostEqual(decision.features["breach_prob_step_max_lower"], 0.19)
+        self.assertEqual(decision.features["breach_prob_any_step_upper"], 1.0)  # min(1, 10 * 0.19)
+        self.assertNotEqual(decision.outcome.risk_tier, "low")
+        self.assertEqual(decision.outcome.risk_tier, "critical")
+        self.assertIs(decision.outcome.status, PolicyStatus.NEEDS_APPROVAL)
+        tier_reason = next(r for r in decision.outcome.reasons if r.startswith("P(breach at some step)"))
+        self.assertIn("is between 0.190 (lower bound, max single step)", tier_reason)
+        self.assertIn("1.000 (upper bound, union bound)", tier_reason)
+        # Two steps: upper bound 0.38 gives "medium" while the lower bound 0.19 alone would be "low".
+        two_steps = Forecast("x", 2, [14.0] * 2, [ROW] * 2)
+        decider2 = ForecastAwareDecider(_StubEngine(_choice({"restock": 0.8, "hold": 0.2})),
+                                        FixedForecaster(two_steps), policy=policy)
+        second = decider2.decide("s", "q", ["restock", "hold"], {"x": [12.0, 13.0, 14.0]}, 2,
+                                 thresholds={"x": 17.1})
+        self.assertAlmostEqual(second.features["breach_prob_any_step_upper"], 0.38)
+        self.assertEqual(second.outcome.risk_tier, "medium")
+        self.assertIn("P(x > 17.1 at some step)", second.augmented_state)
 
     def test_blocked_and_abstain_decisions_never_execute(self):
         blocked_policy = DecisionPolicy(utility=lambda o, f: 1.0, constraints=[("no", lambda o, f: False)])
@@ -525,9 +666,12 @@ class TestFeedbackLedger(unittest.TestCase):
         self.assertAlmostEqual(entry["pinball_loss"], 4.0 / 9.0)
         self.assertEqual(entry["covered_80"], 1)
         self.assertEqual(entry["covered_50"], 1)
-        self.assertAlmostEqual(entry["predicted_breach"], 0.7)  # P(> 12) = 1 - 0.3
+        # One step, so both bounds equal P(> 12) = 1 - 0.3.
+        self.assertAlmostEqual(entry["predicted_breach_lower"], 0.7)
+        self.assertAlmostEqual(entry["predicted_breach_upper"], 0.7)
         self.assertTrue(entry["realized_breach"])
-        self.assertAlmostEqual(entry["brier"], 0.09)
+        self.assertAlmostEqual(entry["brier_lower"], 0.09)
+        self.assertAlmostEqual(entry["brier_upper"], 0.09)
 
     def test_outcome_can_only_be_recorded_once(self):
         ledger = FeedbackLedger()
@@ -553,7 +697,8 @@ class TestFeedbackLedger(unittest.TestCase):
         self.assertAlmostEqual(series["coverage_80"], 0.5)
         self.assertAlmostEqual(series["mean_pinball_loss"], (4.0 / 9.0 + 16.5 / 9.0) / 2)
         self.assertEqual(series["target_coverage_80"], 0.8)
-        self.assertIsNone(series["mean_brier"])  # no thresholds on these decisions
+        self.assertIsNone(series["mean_brier_lower"])  # no thresholds on these decisions
+        self.assertIsNone(series["mean_brier_upper"])
 
     def test_jsonl_round_trip_preserves_records_and_report(self):
         ledger = FeedbackLedger()

@@ -61,19 +61,38 @@ def _as_series(values: Any, min_len: int, label: str = "series") -> np.ndarray:
 def _exceed_at(row: np.ndarray, threshold: float) -> float:
     """P(value > threshold) for one step, from its nine quantiles.
 
-    The CDF is the piecewise-linear interpolation through the points (q_k, level_k).
-    Beyond the outermost quantiles it is extrapolated linearly, using the slope of the
-    nearest segment that has positive width, and clamped to [0, 1]. The true tail mass
-    beyond the 0.1 and 0.9 quantiles is unknown, so this is an approximation. If every
-    quantile is equal (a zero-spread forecast), the value is a point mass: P(value >
-    threshold) is 1 below the point and 0 at or above it.
+    The CDF F(v) = P(value <= v) is the right-continuous piecewise-linear interpolation
+    through the points (q_k, level_k). Ties are resolved to the highest tied level, so a
+    threshold that equals a tied quantile takes the CDF value at the top of the tie. Cases:
+
+    - Threshold equal to a tied lower group. Row [5, 5, 5, 6, 7, 8, 9, 10, 11] with threshold
+      5 gives F(5) = 0.3, the highest tied level, so P(value > 5) = 0.70, not 0.90.
+    - Threshold inside an interior tie, such as row [1, 2, 3, 3, 3, 4, 5, 6, 7] with threshold
+      3: F(3) = 0.5, so P(value > 3) = 0.50.
+    - Threshold equal to a tied upper group. Row [1, 2, 3, 4, 5, 6, 9, 9, 9] with threshold 9:
+      F(9) = 0.9, so P(value > 9) = 0.10. The mass above the top tie is the 0.1 tail.
+    - Threshold strictly between two quantiles: linear interpolation between their levels.
+    - Threshold below the lowest quantile: F is below 0.1 there, so the CDF is extrapolated
+      linearly downward from (q_0, 0.1), using the slope of the lowest segment with positive
+      width, and clamped to [0, 1].
+    - Threshold above the highest quantile: F is at least 0.9 there, so the CDF is
+      extrapolated upward from (q_last, 0.9), using the slope of the highest segment with
+      positive width, and clamped to [0, 1].
+    - Every quantile equal (a zero-spread row): a point mass. P(value > threshold) is 1
+      below the point and 0 at or above it. No segment has width to extrapolate from, so no
+      tail mass is added above the point.
+
+    The true tail mass beyond the 0.1 and 0.9 quantiles is unknown, so the extrapolated
+    values are approximations.
     """
     q = row
     p = _LEVELS_ARR
     positive = np.nonzero(np.diff(q) > 0)[0]
     if positive.size == 0:
         return 1.0 if threshold < q[0] else 0.0
-    if threshold <= q[0]:
+    # Strict inequality: a threshold equal to q[0] belongs to the interpolation branch below,
+    # which takes the highest tied level. Only values strictly below q[0] are extrapolated.
+    if threshold < q[0]:
         k = int(positive[0])
         slope = (p[k + 1] - p[k]) / (q[k + 1] - q[k])
         cdf = p[0] + slope * (threshold - q[0])
@@ -137,8 +156,11 @@ class Forecast:
         """Central prediction interval per step, as ``(lower, upper)`` lists.
 
         ``level=0.8`` returns the 0.1 and 0.9 quantiles; ``level=0.5`` returns the 0.25 and
-        0.75 quantiles (linearly interpolated between stored levels). Levels whose tails
-        fall outside 0.1 to 0.9 cannot be answered and raise ``ValueError``.
+        0.75 quantiles (linearly interpolated between stored levels).
+
+        Supported levels are ``0 < level <= 0.8``. The interval at level L reads the quantile
+        levels ``(1 - L) / 2`` and ``(1 + L) / 2``, which must lie in the stored range
+        [0.1, 0.9]. Larger levels need tails the forecast does not carry and raise ``ValueError``.
         """
         rows = self._require_quantiles()
         level = float(level)
@@ -148,28 +170,42 @@ class Forecast:
         p_hi = round(1.0 - p_lo, 12)
         if p_lo < QUANTILE_LEVELS[0] - 1e-12 or p_hi > QUANTILE_LEVELS[-1] + 1e-12:
             raise ValueError(
-                f"level {level} needs quantiles outside 0.1-0.9; supported levels are in [0.2, 0.8]"
+                f"level {level} needs quantile levels outside the stored range [0.1, 0.9]; "
+                "supported central interval levels are 0 < level <= 0.8"
             )
         lower = [float(np.interp(p_lo, _LEVELS_ARR, row)) for row in rows]
         upper = [float(np.interp(p_hi, _LEVELS_ARR, row)) for row in rows]
         return lower, upper
 
+    def step_exceedance_probs(self, threshold: float) -> List[float]:
+        """P(value > threshold) at each step of the horizon, in step order.
+
+        Each entry is ``prob_exceeds(threshold, step=i)``. See ``prob_exceeds`` for the tie
+        and extrapolation rules.
+        """
+        rows = self._require_quantiles()
+        thr = float(threshold)
+        return [_exceed_at(row, thr) for row in rows]
+
     def prob_exceeds(self, threshold: float, step: Optional[int] = None) -> float:
         """Probability that the value exceeds ``threshold``.
 
         With ``step`` (zero-based index into the horizon), returns P(value > threshold) at
-        that step, estimated from the quantile function by linear interpolation over the
-        nine levels, extrapolated and clamped to [0, 1].
+        that step. It is estimated from the quantile function by linear interpolation over
+        the nine levels, extrapolated and clamped to [0, 1]. Ties resolve to the highest tied
+        level: for row [5, 5, 5, 6, ..., 11] and threshold 5 the result is 0.70.
 
-        With ``step=None``, returns the largest per-step probability over the horizon. This
-        is a lower bound on P(the path exceeds the threshold at some step), because the
-        union is at least the maximum of its members. The joint law of the steps is not
-        modelled, so the bound is not tightened.
+        With ``step=None``, returns the LOWER BOUND ``max_t P(value_t > threshold)``. This is
+        a lower bound on P(the path exceeds the threshold at some step), because the union
+        is at least the maximum of its members. The upper bound is
+        ``min(1, sum_t P(value_t > threshold))`` (the union bound), available from
+        ``step_exceedance_probs``. The joint law of the steps is not modelled, so the true
+        probability lies between the two bounds.
         """
-        rows = self._require_quantiles()
         thr = float(threshold)
         if step is None:
-            return float(max(_exceed_at(row, thr) for row in rows))
+            return float(max(self.step_exceedance_probs(thr)))
+        rows = self._require_quantiles()
         if isinstance(step, bool) or not isinstance(step, (int, np.integer)):
             raise TypeError("step must be an integer index or None")
         if not 0 <= step < self.horizon:
