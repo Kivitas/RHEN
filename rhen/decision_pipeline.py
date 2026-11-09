@@ -10,9 +10,15 @@ Forecast-aware decisions for RHEN.
    constraints, utility, confidence and uncertainty gates, and risk tiers.
 5. Record the decision in an optional ``FeedbackLedger``.
 
-Execution is separate. ``approve`` records a human approver. ``execute`` runs an executor only
-for EXECUTE decisions, or for NEEDS_APPROVAL decisions that have been approved. The policy
-never executes anything.
+Execution is separate. ``approve`` records a human approver in a private registry on the
+decider, keyed by decision_id. ``execute`` runs an executor only for EXECUTE decisions, or for
+NEEDS_APPROVAL decisions with an entry in that registry. It reads nothing else on the decision
+object. The policy never executes anything. The registry is an in-process guard, not a security
+boundary against code that can modify the process.
+
+Breach risk is reported as two bounds on P(the series exceeds its threshold at some step):
+a lower bound (the largest single-step probability) and an upper bound (the union bound,
+the sum of single-step probabilities capped at 1). The risk tier is gated on the upper bound.
 
 Limits: the policy's rules are deterministic and tested, but the utility function, constraints
 and thresholds are the caller's to set. RHEN's decision scorer has no trained weights in the
@@ -112,14 +118,20 @@ class DecisionPolicy:
        Any option that fails a predicate is blocked. No admissible option gives BLOCKED.
     2. Expected utility. Each admissible option scores ``P(option) * utility(option, features)``,
        where P is the engine's probability, not renormalised over the admissible set. The
-       highest score is the candidate. Utilities must be on a nonnegative scale for this
-       ranking to behave intuitively; a note is added to the reasons when a utility is negative.
+       highest score is the candidate. Utilities must be non-negative gains. A negative
+       utility raises ``ValueError``, because with a negative utility a low-probability option
+       can outrank a likely one. This expected-utility form is a heuristic over the option
+       probabilities, not a full cost model, so costs belong outside the policy (for example
+       as constraints).
     3. Abstention. Confidence below ``min_confidence``, forecast uncertainty above
        ``max_forecast_uncertainty``, or the engine's own abstention verdict gives ABSTAIN.
-    4. Risk tier. The tier is ``tier_fn(option, features)`` if given. Otherwise it comes from
-       the largest breach probability: below ``tier_cutoffs[0]`` is "low", below
-       ``tier_cutoffs[1]`` is "medium", below ``tier_cutoffs[2]`` is "high", and anything else is
-       "critical". With no breach threshold supplied, the tier is "low" and the reason says so.
+    4. Risk tier. The tier is ``tier_fn(option, features)`` if given. Otherwise it is gated on
+       the breach upper bound, ``features["breach_prob_any_step_upper"]``, which is the union
+       bound on P(breach at some step): below ``tier_cutoffs[0]`` is "low", below
+       ``tier_cutoffs[1]`` is "medium", below ``tier_cutoffs[2]`` is "high", and anything else
+       is "critical". Gating on the upper bound means the tier is never understated. The lower
+       bound, ``features["breach_prob_step_max_lower"]``, is reported in the reasons but does not
+       set the tier. With no breach threshold supplied, the tier is "low" and the reason says so.
        A tier in ``approval_required_tiers`` gives NEEDS_APPROVAL.
     5. Otherwise EXECUTE.
 
@@ -179,13 +191,21 @@ class DecisionPolicy:
             if tier not in RISK_TIERS:
                 raise ValueError(f"tier_fn returned {tier!r}; expected one of {RISK_TIERS}")
             return tier, f"risk tier {tier!r} from tier_fn"
-        breach = features.get("max_breach_probability")
-        if breach is None:
+        upper = features.get("breach_prob_any_step_upper")
+        if upper is None:
             return "low", "no breach threshold supplied; risk tier defaults to 'low'"
+        lower = features.get("breach_prob_step_max_lower")
+        lower_txt = "n/a" if lower is None else f"{float(lower):.3f}"
+        bounds = (
+            f"P(breach at some step) is between {lower_txt} (lower bound, max single step) and "
+            f"{float(upper):.3f} (upper bound, union bound); the tier is gated on the upper bound"
+        )
         for tier, cut in zip(("low", "medium", "high"), self.tier_cutoffs):
-            if breach < cut:
-                return tier, f"max breach probability {breach:.3f} is below {cut}, risk tier {tier!r}"
-        return "critical", f"max breach probability {breach:.3f} reaches {self.tier_cutoffs[2]}, risk tier 'critical'"
+            if upper < cut:
+                return tier, f"{bounds}, upper bound {upper:.3f} is below {cut}, risk tier {tier!r}"
+        return "critical", (
+            f"{bounds}, upper bound {upper:.3f} reaches {self.tier_cutoffs[2]}, risk tier 'critical'"
+        )
 
     def evaluate(self, choice_result: Any, features: Mapping[str, Any]) -> PolicyOutcome:
         reasons: List[str] = []
@@ -209,9 +229,15 @@ class DecisionPolicy:
             utility = float(self.utility(option, features))
             if not math.isfinite(utility):
                 raise ValueError(f"utility of option {option!r} is not finite: {utility}")
+            if utility < 0:
+                raise ValueError(
+                    f"utility of option {option!r} is negative ({utility:.6g}). Utilities must be "
+                    "non-negative gains. The policy ranks options by P(option) * utility, a heuristic "
+                    "over the engine's option probabilities and not a full cost model, so a negative "
+                    "utility can let a low-probability option outrank a likely one. Represent costs "
+                    "outside the policy, for example as constraints."
+                )
             scored.append((option, probabilities[option] * utility, utility))
-        if any(u < 0 for _, _, u in scored):
-            reasons.append("some admissible utilities are negative; review the utility scale")
 
         best_option, best_eu, best_utility = max(scored, key=lambda item: item[1])
         tier, tier_reason = self.risk_tier(best_option, features)
@@ -238,13 +264,31 @@ class DecisionPolicy:
         return PolicyOutcome(PolicyStatus.EXECUTE, best_option, best_eu, reasons, tier)
 
 
+def _breach_bounds(step_probs: Sequence[float]) -> Tuple[float, float]:
+    """Bounds on P(the path exceeds a threshold at some step), from per-step probabilities.
+
+    Lower bound: the largest single-step probability, since the union is at least each member.
+    Upper bound: the union bound, the sum of single-step probabilities capped at 1.
+    The joint law of the steps is not modelled, so the true probability lies between them.
+    """
+    probs = [float(p) for p in step_probs]
+    return max(probs), min(1.0, sum(probs))
+
+
 def _build_features(
     forecasts: Mapping[str, Forecast],
     histories: Mapping[str, List[float]],
     thresholds: Mapping[str, float],
 ) -> Dict[str, Any]:
+    """Features the policy reads. Breach figures are bounds, not point probabilities.
+
+    Per series: ``breach_prob_step_max_lower`` (max single-step probability) and
+    ``breach_prob_any_step_upper`` (union bound, capped at 1). Top level: the same two bounds
+    computed over every thresholded series and step together, so the upper bound covers any
+    breach of any series. The risk tier is gated on ``breach_prob_any_step_upper``.
+    """
     per_series: Dict[str, Dict[str, Any]] = {}
-    breach_values: List[float] = []
+    all_step_probs: List[float] = []
     uncertainties: List[float] = []
     for name, fc in forecasts.items():
         last = histories[name][-1]
@@ -259,17 +303,26 @@ def _build_features(
             "interval_width_end": upper[-1] - lower[-1],
             "uncertainty": uncertainty,
             "threshold": None,
-            "breach_probability": None,
+            "breach_prob_step_max_lower": None,
+            "breach_prob_any_step_upper": None,
         }
         if name in thresholds:
+            step_probs = fc.step_exceedance_probs(thresholds[name])
+            series_lower, series_upper = _breach_bounds(step_probs)
             entry["threshold"] = thresholds[name]
-            entry["breach_probability"] = fc.prob_exceeds(thresholds[name])
-            breach_values.append(entry["breach_probability"])
+            entry["breach_prob_step_max_lower"] = series_lower
+            entry["breach_prob_any_step_upper"] = series_upper
+            all_step_probs.extend(step_probs)
         per_series[name] = entry
         uncertainties.append(uncertainty)
+    if all_step_probs:
+        overall_lower, overall_upper = _breach_bounds(all_step_probs)
+    else:
+        overall_lower = overall_upper = None
     return {
         "series": per_series,
-        "max_breach_probability": max(breach_values) if breach_values else None,
+        "breach_prob_step_max_lower": overall_lower,
+        "breach_prob_any_step_upper": overall_upper,
         "uncertainty": max(uncertainties),
     }
 
@@ -299,8 +352,11 @@ def _augmented_state(
             f"80% band at horizon end [{lower[-1]:.4g}, {upper[-1]:.4g}]"
         )
         if name in thresholds:
-            p = fc.prob_exceeds(thresholds[name])
-            line += f"; P({name} > {thresholds[name]:.4g} within horizon) = {p:.3f}"
+            series_lower, series_upper = _breach_bounds(fc.step_exceedance_probs(thresholds[name]))
+            line += (
+                f"; P({name} > {thresholds[name]:.4g} at some step) is between {series_lower:.3f} "
+                f"(max single step, lower bound) and {series_upper:.3f} (union bound, upper bound)"
+            )
         lines.append(line)
     return "\n".join(lines)
 
@@ -320,10 +376,25 @@ class FutureAwareDecision:
     augmented_state: str
     choice: "ChoiceResult"
     outcome: PolicyOutcome
-    approval: Optional[Dict[str, str]] = None
     executed_at: Optional[str] = None
     executed_option: Optional[str] = None
     execution_error: Optional[str] = None
+    # The decider's private approval registry (decision_id -> approval record). Set by the
+    # decider. ``approval`` reads from it. ``execute`` gates on the decider's own registry,
+    # never on this reference or on any attribute of the decision.
+    _approvals: Optional[Mapping[str, Dict[str, str]]] = field(default=None, repr=False, compare=False)
+
+    @property
+    def approval(self) -> Optional[Dict[str, str]]:
+        """Read-only copy of the approval recorded for this decision, or None.
+
+        Assigning to this attribute raises AttributeError. Approvals are written only by
+        ``ForecastAwareDecider.approve``.
+        """
+        if self._approvals is None:
+            return None
+        entry = self._approvals.get(self.decision_id)
+        return None if entry is None else dict(entry)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -342,7 +413,7 @@ class FutureAwareDecision:
                 "confidence": float(self.choice.confidence),
             },
             "outcome": self.outcome.to_dict(),
-            "approval": None if self.approval is None else dict(self.approval),
+            "approval": self.approval,
             "executed_at": self.executed_at,
             "executed_option": self.executed_option,
             "execution_error": self.execution_error,
@@ -358,6 +429,11 @@ class ForecastAwareDecider:
         policy: A ``DecisionPolicy``. The default uses a constant utility of 1.0, which ranks
             options by engine probability alone. Set a real utility for real use.
         ledger: Optional ``FeedbackLedger``. Decisions are recorded in it when given.
+
+    Approvals are kept in a private registry on this decider, keyed by decision_id, and written
+    only by ``approve``. ``execute`` gates NEEDS_APPROVAL decisions on that registry alone. Setting
+    an ``approval`` attribute on a decision does not authorise anything. This is an in-process
+    guard, not a security boundary against code that can modify the process.
     """
 
     def __init__(
@@ -372,6 +448,7 @@ class ForecastAwareDecider:
         self.policy = policy if policy is not None else DecisionPolicy(utility=_unit_utility)
         self.ledger = ledger
         self._decisions: Dict[str, FutureAwareDecision] = {}
+        self._approvals: Dict[str, Dict[str, str]] = {}
 
     def decide(
         self,
@@ -428,6 +505,7 @@ class ForecastAwareDecider:
             augmented_state=augmented,
             choice=choice,
             outcome=outcome,
+            _approvals=self._approvals,
         )
         self._decisions[decision.decision_id] = decision
         if self.ledger is not None:
@@ -443,7 +521,11 @@ class ForecastAwareDecider:
             ) from None
 
     def approve(self, decision_id: str, approver: str) -> Dict[str, str]:
-        """Record an explicit human approval for a NEEDS_APPROVAL decision."""
+        """Record an explicit human approval for a NEEDS_APPROVAL decision.
+
+        The approval (approver and UTC timestamp) is written to this decider's private registry,
+        and mirrored to the ledger when one is set. Returns a copy of the registry entry.
+        """
         decision = self._lookup(decision_id)
         if not isinstance(approver, str) or not approver.strip():
             raise DecisionGateError("approver must be a non-empty name")
@@ -452,20 +534,25 @@ class ForecastAwareDecider:
                 f"decision {decision_id} has status {decision.outcome.status.value}; "
                 "only NEEDS_APPROVAL decisions can be approved"
             )
-        if decision.approval is not None:
-            raise DecisionGateError(f"decision {decision_id} is already approved by {decision.approval['approver']!r}")
+        if decision_id in self._approvals:
+            raise DecisionGateError(
+                f"decision {decision_id} is already approved by {self._approvals[decision_id]['approver']!r}"
+            )
+        name = approver.strip()
         approved_at = _utc_now()
         if self.ledger is not None:
-            self.ledger.record_approval(decision_id, approver.strip(), approved_at)
-        decision.approval = {"approver": approver.strip(), "approved_at": approved_at}
-        return dict(decision.approval)
+            self.ledger.record_approval(decision_id, name, approved_at)
+        self._approvals[decision_id] = {"approver": name, "approved_at": approved_at}
+        return dict(self._approvals[decision_id])
 
     def execute(self, decision: FutureAwareDecision, executor: Callable[[str, FutureAwareDecision], Any]) -> Any:
         """Run ``executor(option, decision)`` if the gate allows it.
 
-        EXECUTE runs immediately. NEEDS_APPROVAL runs only after ``approve``. BLOCKED and
-        ABSTAIN are refused. Each decision executes at most once. The execution is marked
-        before the executor runs, so a failed executor is not retried automatically.
+        EXECUTE runs immediately. NEEDS_APPROVAL runs only when this decider's approval registry
+        holds an entry for the decision, which ``approve`` writes. Nothing on the decision object
+        is consulted for this check. BLOCKED and ABSTAIN are refused. Each decision executes at
+        most once. The execution is marked before the executor runs, so a failed executor is not
+        retried automatically. This is an in-process guard, not a security boundary.
         """
         if not isinstance(decision, FutureAwareDecision):
             raise TypeError("decision must be a FutureAwareDecision produced by this decider")
@@ -474,7 +561,7 @@ class ForecastAwareDecider:
         if decision.executed_at is not None:
             raise DecisionGateError(f"decision {decision.decision_id} has already been executed")
         status = decision.outcome.status
-        if status is PolicyStatus.NEEDS_APPROVAL and decision.approval is None:
+        if status is PolicyStatus.NEEDS_APPROVAL and decision.decision_id not in self._approvals:
             raise DecisionGateError(f"decision {decision.decision_id} needs human approval before execution")
         if status not in (PolicyStatus.EXECUTE, PolicyStatus.NEEDS_APPROVAL):
             raise DecisionGateError(
@@ -648,9 +735,10 @@ class FeedbackLedger:
         """Score a decision against realized values for every forecast series.
 
         Per series, this records the pinball loss over the nine quantile levels, the number
-        of steps inside the 80% and 50% bands, and, when a threshold was set, the predicted
-        breach probability, the realized breach (any step above the threshold) and the Brier
-        score between them.
+        of steps inside the 80% and 50% bands, and, when a threshold was set, both bounds on
+        the predicted probability of a breach at some step (``predicted_breach_lower`` and
+        ``predicted_breach_upper``), the realized breach (any step above the threshold), and a
+        Brier score under each bound (``brier_lower``, ``brier_upper``).
         """
         record = self.get(decision_id)
         if record.outcome is not None:
@@ -671,13 +759,15 @@ class FeedbackLedger:
                 entry["covered_50"] = int(sum(lo <= v <= hi for lo, hi, v in zip(lower50, upper50, y)))
             threshold = record.thresholds.get(name)
             if threshold is not None and fc.quantiles is not None:
-                predicted = fc.prob_exceeds(threshold)
+                lower, upper = _breach_bounds(fc.step_exceedance_probs(threshold))
                 occurred = bool(np.any(y > threshold))
                 entry.update(
                     threshold=threshold,
-                    predicted_breach=predicted,
+                    predicted_breach_lower=lower,
+                    predicted_breach_upper=upper,
                     realized_breach=occurred,
-                    brier=brier_score(predicted, occurred),
+                    brier_lower=brier_score(lower, occurred),
+                    brier_upper=brier_score(upper, occurred),
                 )
             per_series[name] = entry
 
@@ -688,8 +778,10 @@ class FeedbackLedger:
         """Aggregate calibration across every decision that has an outcome.
 
         Pinball loss and coverage are weighted by horizon steps. Coverage targets are 0.8 and
-        0.5. Brier scores are averaged over breach outcomes. This is a calibration summary,
-        not evidence that decisions were better.
+        0.5. Breach figures are averaged over outcomes with a threshold. The true breach
+        probability lies between the lower and upper bounds, so each Brier score treats one
+        bound as the forecast probability, and neither bound is a calibrated probability on its
+        own. This is a calibration summary, not evidence that decisions were better.
         """
         scored = [r for r in self._records if r.outcome is not None]
         acc: Dict[str, Dict[str, float]] = {}
@@ -697,7 +789,8 @@ class FeedbackLedger:
             for name, entry in rec.outcome["series"].items():
                 a = acc.setdefault(name, {
                     "outcomes": 0, "quantile_steps": 0, "pinball_sum": 0.0, "covered_80": 0, "covered_50": 0,
-                    "breach_outcomes": 0, "brier_sum": 0.0, "predicted_breach_sum": 0.0, "realized_breaches": 0,
+                    "breach_outcomes": 0, "brier_lower_sum": 0.0, "brier_upper_sum": 0.0,
+                    "predicted_lower_sum": 0.0, "predicted_upper_sum": 0.0, "realized_breaches": 0,
                 })
                 a["outcomes"] += 1
                 if "pinball_loss" in entry:
@@ -706,10 +799,12 @@ class FeedbackLedger:
                     a["pinball_sum"] += entry["pinball_loss"] * h
                     a["covered_80"] += entry["covered_80"]
                     a["covered_50"] += entry["covered_50"]
-                if "brier" in entry:
+                if "brier_lower" in entry:
                     a["breach_outcomes"] += 1
-                    a["brier_sum"] += entry["brier"]
-                    a["predicted_breach_sum"] += entry["predicted_breach"]
+                    a["brier_lower_sum"] += entry["brier_lower"]
+                    a["brier_upper_sum"] += entry["brier_upper"]
+                    a["predicted_lower_sum"] += entry["predicted_breach_lower"]
+                    a["predicted_upper_sum"] += entry["predicted_breach_upper"]
                     a["realized_breaches"] += int(entry["realized_breach"])
 
         series_report: Dict[str, Dict[str, Any]] = {}
@@ -725,8 +820,10 @@ class FeedbackLedger:
                 "coverage_50": (a["covered_50"] / steps) if steps else None,
                 "target_coverage_50": 0.5,
                 "breach_outcomes": int(nb),
-                "mean_brier": (a["brier_sum"] / nb) if nb else None,
-                "mean_predicted_breach": (a["predicted_breach_sum"] / nb) if nb else None,
+                "mean_brier_lower": (a["brier_lower_sum"] / nb) if nb else None,
+                "mean_brier_upper": (a["brier_upper_sum"] / nb) if nb else None,
+                "mean_predicted_breach_lower": (a["predicted_lower_sum"] / nb) if nb else None,
+                "mean_predicted_breach_upper": (a["predicted_upper_sum"] / nb) if nb else None,
                 "realized_breach_rate": (a["realized_breaches"] / nb) if nb else None,
             }
         status_counts: Dict[str, int] = {}

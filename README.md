@@ -516,7 +516,7 @@ decision = decider.decide(
     options=["restock_now", "hold"],
     series={"demand": weekly_demand},          # list of floats
     horizon=6,
-    thresholds={"demand": 165.0},              # P(demand > 165 within horizon) feeds the risk tier
+    thresholds={"demand": 165.0},              # the risk tier is gated on the upper bound on P(demand > 165 at some step)
 )
 
 if decision.outcome.status.value == "NEEDS_APPROVAL":
@@ -531,22 +531,23 @@ print(ledger.calibration_report())
 
 | Component | Purpose |
 | :--- | :--- |
-| **`Forecast`** | Median path plus nine quantiles (levels 0.1 to 0.9) per step. `interval(0.8)`, `interval(0.5)`, `prob_exceeds(threshold, step)` and `uncertainty()` are computed from the quantile function by linear interpolation. |
+| **`Forecast`** | Median path plus nine quantiles (levels 0.1 to 0.9) per step. `interval(level)` supports `0 < level <= 0.8`. `prob_exceeds(threshold, step)`, `step_exceedance_probs(threshold)` and `uncertainty()` are computed from the quantile function by linear interpolation. Ties resolve to the highest tied level, so for quantiles `[5, 5, 5, 6, ..., 11]` the exceedance at 5 is 0.70. |
 | **`NaiveQuantileForecaster`** | Dependency-free random-walk baseline and the default forecaster. Its median is the last value and its bands come from the empirical quantiles of one-step differences, scaled by the square root of the horizon. |
 | **`TimesFMForecaster`** | Adapter for Google TimesFM 3.0 through the `timesfm3` package. Requires `pip install "rhen[forecast]"`. See the licence note below. |
-| **`ForecastAwareDecider`** | Runs forecast, state augmentation, `RhenEngine.choice`, policy and ledger. `approve` and `execute` are the only paths to an action. |
+| **`ForecastAwareDecider`** | Runs forecast, state augmentation, `RhenEngine.choice`, policy and ledger. `execute` is the only method in this module that calls the executor. It runs an EXECUTE decision, or a NEEDS_APPROVAL decision that has an entry in the decider's private approval registry, which only `approve` writes. This is an in-process guard, not a security boundary against code that can modify the process. |
 | **`DecisionPolicy`** | Deterministic gate. Returns `EXECUTE`, `NEEDS_APPROVAL`, `ABSTAIN` or `BLOCKED`, with reasons for each. It never executes anything. |
 | **`FeedbackLedger`** | Records decisions and outcomes. Reports pinball loss, interval coverage and Brier score against realized values. Round-trips through JSONL. |
 | **Error metrics** | `pinball_loss`, `interval_coverage`, `mase` and `brier_score`. |
 
-**Policy rules**, applied in order: no admissible option gives `BLOCKED`. Constraint predicates block options. Options are then ranked by `P(option) × utility(option, features)`. Confidence below `min_confidence`, forecast uncertainty above `max_forecast_uncertainty`, or the engine's own abstention gives `ABSTAIN`. A risk tier in `approval_required_tiers` gives `NEEDS_APPROVAL`. Otherwise the result is `EXECUTE`. The risk tier comes from `tier_fn` if you supply one, and otherwise from the largest breach probability against `tier_cutoffs` (0.2, 0.5, 0.8 by default).
+**Policy rules**, applied in order: no admissible option gives `BLOCKED`. Constraint predicates block options. Options are then ranked by `P(option) × utility(option, features)`. Utilities must be non-negative gains; a negative utility raises `ValueError`. This is a heuristic over the engine's option probabilities, not a full cost model. Confidence below `min_confidence`, forecast uncertainty above `max_forecast_uncertainty`, or the engine's own abstention gives `ABSTAIN`. A risk tier in `approval_required_tiers` gives `NEEDS_APPROVAL`. Otherwise the result is `EXECUTE`. The risk tier comes from `tier_fn` if you supply one. Otherwise it is gated on the breach upper bound, the union bound `min(1, Σ_t P(demand_t > threshold))`, against `tier_cutoffs` (0.2, 0.5, 0.8 by default). Gating on the upper bound means the tier is never understated.
 
 **TimesFM 3.0 licence.** The TimesFM 3.0 source code is Apache-2.0, but the 3.0 pretrained weights (`google/timesfm-3.0-pytorch`) are released under `timesfm-non-commercial-license-v1.0`. They are restricted to non-commercial, non-production use. RHEN is MIT-licensed. `TimesFMForecaster` therefore raises `ValueError` unless you pass `license_acknowledged=True`, and you should pass it only if your use is non-commercial and non-production. The example needs both `--timesfm` and `--accept-noncommercial-license`. Nothing in RHEN is licensed to override the weights' terms.
 
 **Limits.**
 - RHEN's decision scorer has no trained weights in this repository. The pipeline conditions the decision on the forecast and gates actions on forecast risk. It does not show that the forecast improves decision accuracy, and no benchmark is claimed.
 - The policy's rules are deterministic and tested. The utility function, constraints and thresholds are yours to set. The default utility is a constant 1.0, which ranks options by engine probability alone.
-- The breach probability for a series is the largest per-step probability. This is a lower bound on the probability of breaching at some step, because the joint distribution across steps is not modelled.
+- Breach risk is reported as two bounds on P(the series exceeds its threshold at some step within the horizon). The lower bound, `breach_prob_step_max_lower`, is the largest single-step probability. The upper bound, `breach_prob_any_step_upper`, is the union bound, the sum of single-step probabilities capped at 1. The joint distribution across steps is not modelled, so the true probability lies between the two. The risk tier is gated on the upper bound.
+- The ledger's breach Brier scores are computed once under each bound, because neither bound is a calibrated probability on its own.
 - Quantile tails beyond the 0.1 and 0.9 levels are extrapolated, so exceedance probabilities far outside the band are approximate.
 - The ledger measures forecast calibration against realized values. It does not measure whether decisions were good.
 
