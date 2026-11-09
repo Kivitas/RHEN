@@ -110,7 +110,10 @@ def _decoded(packed, tokenizer):
 
 def _spawn_python(script, hash_seed):
     """Start `python -c script` in the repo directory with a fixed PYTHONHASHSEED."""
+    # The helper imports rhen_packer (repo root) and test_regressions_io (this tests/ directory).
+    extra_path = os.pathsep.join([str(REPO_DIR), os.path.join(str(REPO_DIR), "tests")])
     env = dict(os.environ, PYTHONHASHSEED=str(hash_seed))
+    env["PYTHONPATH"] = os.pathsep.join(p for p in [extra_path, os.environ.get("PYTHONPATH", "")] if p)
     return subprocess.Popen(
         [sys.executable, "-c", script],
         cwd=REPO_DIR,
