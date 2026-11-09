@@ -1,6 +1,6 @@
 """Regression guards for the test runner, the CI matrix and the contributor docs.
 
-run_tests.py must discover every root-level test_*.py as a suite, and its
+run_tests.py must discover every test_*.py in tests/ as a suite, and its
 --list and banner output must stay pure ASCII (Windows consoles garble
 non-ASCII). ci.yml must keep the Windows and Python 3.10 legs and an all-files
 pyflakes lint. CONTRIBUTING.md must keep a sequential numbered list and no
@@ -29,6 +29,8 @@ ROOT = (
 )
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "tests") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tests"))
 
 import run_tests  # noqa: E402  (after the sys.path tweak above)
 
@@ -69,15 +71,15 @@ def _args(suite=None, fast=False, slow=False):
     return argparse.Namespace(suite=suite, fast=fast, slow=slow, list_only=False)
 
 
-def _root_test_files_by_glob():
-    """Independent of run_tests: a plain glob over the real repo root."""
-    pattern = os.path.join(str(ROOT), "test_*.py")
+def _suite_files_by_glob():
+    """Independent of run_tests: a plain glob over the real tests/ directory."""
+    pattern = os.path.join(str(ROOT / "tests"), "test_*.py")
     return {os.path.basename(p) for p in glob.glob(pattern) if os.path.isfile(p)}
 
 
 def _run_list():
     return subprocess.run(
-        [sys.executable, str(ROOT / "run_tests.py"), "--list"],
+        [sys.executable, str(ROOT / "tests" / "run_tests.py"), "--list"],
         capture_output=True,
         cwd=str(ROOT),
         timeout=60,
@@ -85,8 +87,12 @@ def _run_list():
 
 
 class DiscoveryTests(unittest.TestCase):
-    def test_discovers_every_root_test_file(self):
-        self.assertEqual(set(run_tests.discover_suites()), _root_test_files_by_glob())
+    def test_discovers_every_tests_dir_suite(self):
+        self.assertEqual(set(run_tests.discover_suites()), _suite_files_by_glob())
+
+    def test_no_test_files_left_in_repo_root(self):
+        stray = sorted(p.name for p in ROOT.glob("test_*.py"))
+        self.assertEqual(stray, [], "test files must live only in tests/")
 
     def test_known_suites_first_in_registered_order_then_unknown_sorted(self):
         with fake_repo(DISCOVERY_FILES, DISCOVERY_HINTS):

@@ -2,11 +2,11 @@
 
 Single process (CPU, one GPU/NPU/XPU, Apple MPS)::
 
-    python -m eos_research.train --config configs/tiny_decisions.json
+    python -m rhen.research.train --config configs/tiny_decisions.json
 
 Multi-device or multi-node (any launcher that sets RANK/WORLD_SIZE/LOCAL_RANK)::
 
-    torchrun --nproc_per_node 8 -m eos_research.train --config cfg.json --set strategy=fsdp
+    torchrun --nproc_per_node 8 -m rhen.research.train --config cfg.json --set strategy=fsdp
 
 Any field of ``TrainConfig`` can be overridden with ``--set key=value`` (values are parsed as
 JSON when possible; ``model_overrides.hidden_size=512`` reaches into the nested dict).
@@ -31,10 +31,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 import torch.nn as nn
 
-from eos_research import checkpointing as ckpt
-from eos_research import device as devmod
-from eos_research import distributed as distmod
-from eos_research.data import (
+from rhen.research import checkpointing as ckpt
+from rhen.research import device as devmod
+from rhen.research import distributed as distmod
+from rhen.research.data import (
     DecisionExample,
     TokenWindows,
     lm_inputs,
@@ -42,8 +42,8 @@ from eos_research.data import (
     read_meta,
     sample_decision_batch,
 )
-from eos_research.manifest import build_manifest, write_json
-from eos_research.presets import preset_config
+from rhen.research.manifest import build_manifest, write_json
+from rhen.research.presets import preset_config
 
 SCHEDULES = ("cosine", "wsd", "constant")
 OPTIMIZERS = ("adamw", "muon")
@@ -67,13 +67,13 @@ class TrainConfig:
     init_from: Optional[str] = None  # checkpoint dir whose weights initialise the model
     gradient_checkpointing: bool = False
     tokenizer_path: Optional[str] = None
-    # Language-model data (output of eos_research.prepare)
+    # Language-model data (output of rhen.research.prepare)
     lm_data: Optional[str] = None
     seq_len: int = 256
     micro_batch_size: int = 8
     grad_accum_steps: int = 1
     lm_loss_coef: float = 1.0
-    # Decision data (JSON lines, see eos_research.data)
+    # Decision data (JSON lines, see rhen.research.data)
     decision_train: Optional[str] = None
     decision_val: Optional[str] = None
     decision_batch_size: int = 4  # examples per micro-step
@@ -436,8 +436,8 @@ class Trainer:
 
     # -- evaluation --------------------------------------------------------------------------
     def evaluate(self) -> Dict[str, Any]:
-        from eos_research.evaluate import decision_records, evaluate_lm
-        from eos_research.metrics import summarize
+        from rhen.research.evaluate import decision_records, evaluate_lm
+        from rhen.research.metrics import summarize
 
         results: Dict[str, Any] = {}
         if self.lm_val is not None:

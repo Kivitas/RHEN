@@ -5,15 +5,10 @@ from transformers import AutoTokenizer
 
 logger = logging.getLogger("tokenizer")
 
-#: The bundled tokenizer directory, resolved next to this module so it works from any CWD.
+#: The bundled tokenizer directory (packaged as rhen/tokenizer_assets), resolved next to
+#: this module so it works from any CWD.
 _this_dir = os.path.dirname(os.path.abspath(__file__))
-_candidate_dirs = [
-    os.path.join(os.path.dirname(_this_dir), "EOS_Tokenizer"),
-    os.path.join(_this_dir, "EOS_Tokenizer"),
-    os.path.join(_this_dir, "tokenizer_assets"),
-    os.path.join(os.path.dirname(_this_dir), "rhen", "tokenizer_assets"),
-]
-DEFAULT_TOKENIZER_DIR = next((d for d in _candidate_dirs if os.path.isdir(d)), _candidate_dirs[0])
+DEFAULT_TOKENIZER_DIR = os.path.join(_this_dir, "tokenizer_assets")
 
 STATE_TOKEN = "<|state|>"
 STATE_DIFF_TOKEN = "<|state_diff|>"
@@ -43,7 +38,7 @@ class EOSTokenizer:
     """
     EOS Tokenizer with full Rhen System One Decision Delimiter Registry.
 
-    Loads a tokenizer from a local directory (default: the EOS_Tokenizer directory next to
+    Loads a tokenizer from a local directory (default: the tokenizer_assets directory next to
     this module). Remote code is never executed (trust_remote_code=False) and nothing is
     downloaded: a path that does not exist, or cannot be loaded, raises RuntimeError.
     """
@@ -52,7 +47,7 @@ class EOSTokenizer:
         if not os.path.exists(path):
             raise RuntimeError(
                 f"EOS tokenizer path '{path}' does not exist. Pass a local tokenizer directory "
-                "(default: the EOS_Tokenizer directory next to this module, or one written by save_pretrained or "
+                "(default: the tokenizer_assets directory next to this module, or one written by save_pretrained or "
                 "build_custom_bpe_tokenizer). No remote download is attempted."
             )
 

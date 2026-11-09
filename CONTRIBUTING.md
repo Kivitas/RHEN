@@ -69,12 +69,12 @@ RHEN eliminates token generation overhead for agent tool orchestration and multi
    pytest tests/test_regressions_infra.py
    ```
 
-3. **Subprocess Test Battery Runner** — the root runner executes each test suite in an isolated subprocess:
+3. **Subprocess Test Battery Runner** — `tests/run_tests.py` executes each test suite in tests/ in an isolated subprocess:
    ```bash
-   python run_tests.py              # Full battery
-   python run_tests.py --fast       # Fast feedback loop (suites under 15s)
-   python run_tests.py --slow       # Heavyweight verification gates
-   python run_tests.py --suite test_cli.py
+   python tests/run_tests.py              # Full battery
+   python tests/run_tests.py --fast       # Fast feedback loop (suites under 15s)
+   python tests/run_tests.py --slow       # Heavyweight verification gates
+   python tests/run_tests.py --suite test_cli.py
    ```
 
 4. **Non-Autoregressive Decision Philosophy** — decisions must never require token-by-token generation. Decisions are evaluated in a single forward pass over packed 2D block-causal state and candidate options. Primitives must return typed result dataclasses (`NoulResult`, `ChoiceResult`, etc.) with explicit confidence and conformal sets.

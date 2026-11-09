@@ -226,7 +226,7 @@ class RingMLA(nn.Module):
             v = v.transpose(1, 2)
             
             # Apply RoPE
-            from optim.quantized_kv import apply_rotary_pos_emb
+            from rhen.optim.quantized_kv import apply_rotary_pos_emb
             q, k_rope = apply_rotary_pos_emb(q, k_rope, cos, sin)
             k = k_unrope + k_rope
             
@@ -255,7 +255,7 @@ class RingMLA(nn.Module):
         k_rope_expanded = k_rope.repeat(1, 1, self.world_size, 1)
         
         # Apply RoPE
-        from optim.quantized_kv import apply_rotary_pos_emb
+        from rhen.optim.quantized_kv import apply_rotary_pos_emb
         cos_expanded = cos.repeat(1, 1, self.world_size, 1) if cos.ndim == 4 else cos.repeat(self.world_size, 1)
         sin_expanded = sin.repeat(1, 1, self.world_size, 1) if sin.ndim == 4 else sin.repeat(self.world_size, 1)
         q, k_rope = apply_rotary_pos_emb(q, k_rope_expanded, cos_expanded, sin_expanded)

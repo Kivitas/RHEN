@@ -12,8 +12,8 @@ import os
 import sys
 from typing import Any, Dict, Optional, Sequence
 
-from eos_research import distributed as distmod
-from eos_research.train import (
+from rhen.research import distributed as distmod
+from rhen.research.train import (
     OPTIMIZERS,
     SCHEDULES,
     TrainConfig,

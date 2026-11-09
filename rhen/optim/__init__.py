@@ -2,11 +2,11 @@ import logging
 
 import torch
 from typing import Any
-from optim.grouped_gemm import GroupedGEMMWrapper, create_grouped_gemm_moe
-from optim.quantized_kv import QuantizedMultiLatentAttention, create_quantized_mla
-from optim.checkpoint import CheckpointedRecurrentCore
-from optim.mup import RecurrentMuP, create_mup_config, apply_mup_init
-from optim.fused_swiglu import FusedSwiGLUModule, create_fused_swiglu
+from rhen.optim.grouped_gemm import GroupedGEMMWrapper, create_grouped_gemm_moe
+from rhen.optim.quantized_kv import QuantizedMultiLatentAttention, create_quantized_mla
+from rhen.optim.checkpoint import CheckpointedRecurrentCore
+from rhen.optim.mup import RecurrentMuP, create_mup_config, apply_mup_init
+from rhen.optim.fused_swiglu import FusedSwiGLUModule, create_fused_swiglu
 
 logger = logging.getLogger(__name__)
 

@@ -23,7 +23,7 @@ keywords = [
     "deep-learning"
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -82,4 +82,4 @@ py-modules = [
 
 [tool.setuptools.package-data]
 rhen = ["py.typed", "tokenizer_assets/*"]
-"*" = ["EOS_Tokenizer/*", "configs/*.json"]
+"*" = ["configs/*.json"]
