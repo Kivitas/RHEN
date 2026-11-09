@@ -25,9 +25,12 @@ import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import warnings
 from unittest import mock
@@ -481,6 +484,186 @@ class ContextBuilderInjectionTests(unittest.TestCase):
         state = ContextBuilder().add_text("a").add_json({"k": 1}).build_state_string()
         self.assertIn("--- CONTEXT ---", state.splitlines())
         self.assertIn("--- JSON DATA ---", state.splitlines())
+
+
+class AuditSocketBindTests(unittest.TestCase):
+    """F12: the TCP audit receiver binds loopback unless the caller opts in."""
+
+    KEY = b"k" * 16
+
+    @staticmethod
+    def _free_port():
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+
+    def test_empty_and_localhost_hosts_bind_loopback(self):
+        from rhen.rhen_verify import _tcp_bind_host
+
+        self.assertEqual(_tcp_bind_host(""), "127.0.0.1")
+        self.assertEqual(_tcp_bind_host("localhost"), "127.0.0.1")
+        self.assertEqual(_tcp_bind_host("127.0.0.2"), "127.0.0.2")
+
+    def test_empty_host_receiver_accepts_on_loopback(self):
+        from rhen.rhen_verify import serve_audit_socket
+
+        port = self._free_port()
+        store = os.path.join(tempfile.mkdtemp(), "audit.jsonl")
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=serve_audit_socket,
+            kwargs={"address": f":{port}", "store_path": store, "stop_event": stop, "key": self.KEY},
+            daemon=True,
+        )
+        thread.start()
+        try:
+            deadline = time.time() + 5
+            while True:
+                try:
+                    socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+                    break
+                except OSError:
+                    if time.time() > deadline:
+                        raise
+                    time.sleep(0.05)
+        finally:
+            stop.set()
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+
+    def test_remote_host_is_refused_without_allow_remote(self):
+        from rhen.rhen_verify import serve_audit_socket
+
+        store = os.path.join(tempfile.mkdtemp(), "audit.jsonl")
+        for address in ("0.0.0.0:9", "192.0.2.10:9", "receiver.example:9"):
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError):
+                    serve_audit_socket(address, store, key=self.KEY)
+
+    def test_allow_remote_is_an_explicit_opt_in(self):
+        from rhen.rhen_verify import _tcp_bind_host
+
+        self.assertEqual(_tcp_bind_host("0.0.0.0", allow_remote=True), "0.0.0.0")
+        self.assertEqual(_tcp_bind_host("192.0.2.10", allow_remote=True), "192.0.2.10")
+        with self.assertRaises(ValueError):
+            _tcp_bind_host("0.0.0.0")
+
+
+_SENTINEL_CALLS = []
+
+
+def _record_call(value):
+    _SENTINEL_CALLS.append(value)
+
+
+class _CraftedRngPayload:
+    """Pickles to a call of _record_call, so loading it would run that call."""
+
+    def __reduce__(self):
+        return (_record_call, ("ran",))
+
+
+class RngCheckpointFormatTests(unittest.TestCase):
+    """RNG checkpoint state is stored as plain types and read with weights_only=True."""
+
+    @staticmethod
+    def _draws():
+        import random
+
+        import numpy as np
+
+        return (
+            random.random(),
+            random.gauss(0, 1),
+            float(np.random.rand()),
+            float(np.random.normal()),
+            torch.rand(4).tolist(),
+        )
+
+    def test_round_trip_reproduces_next_draws_under_weights_only(self):
+        import random
+
+        import numpy as np
+
+        from rhen.research import checkpointing as ckpt
+
+        random.seed(11)
+        np.random.seed(12)
+        torch.manual_seed(13)
+        random.gauss(0, 1)
+        np.random.normal()  # leaves a cached NumPy gaussian, which must survive the round trip
+        torch.rand(2)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "rng_rank0.pt")
+            torch.save(ckpt._rng_state(), path)
+            expected = self._draws()
+            random.seed(0)
+            np.random.seed(0)
+            torch.manual_seed(0)
+            ckpt._set_rng_state(torch.load(path, map_location="cpu", weights_only=True))
+            self.assertEqual(self._draws(), expected)
+
+    def test_saved_rng_state_holds_only_plain_types(self):
+        from rhen.research import checkpointing as ckpt
+
+        allowed = (dict, list, str, int, float, type(None))
+
+        def walk(obj):
+            self.assertIsInstance(obj, allowed)
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    self.assertIsInstance(key, str)
+                    walk(value)
+            elif isinstance(obj, list):
+                for value in obj:
+                    walk(value)
+
+        walk(ckpt._rng_state())
+
+    def test_new_layout_rng_file_loads_without_warning(self):
+        from rhen.research import checkpointing as ckpt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "rng_rank0.pt")
+            torch.save(ckpt._rng_state(), path)
+            with self.assertNoLogs("rhen.research.checkpointing", level="WARNING"):
+                ckpt._load_rng_file(path)
+
+    def test_old_layout_rng_file_warns_then_restores(self):
+        import random
+
+        import numpy as np
+
+        from rhen.research import checkpointing as ckpt
+
+        random.seed(21)
+        np.random.seed(22)
+        torch.manual_seed(23)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "rng_rank0.pt")
+            legacy = {"python": random.getstate(), "torch": torch.get_rng_state(), "numpy": np.random.get_state()}
+            torch.save(legacy, path)
+            expected = self._draws()
+            random.seed(0)
+            np.random.seed(0)
+            torch.manual_seed(0)
+            with self.assertLogs("rhen.research.checkpointing", level="WARNING") as logs:
+                state = ckpt._load_rng_file(path)
+            self.assertIn("old checkpoint format", logs.output[0])
+            self.assertIn("trusted source", logs.output[0])
+            ckpt._set_rng_state(state)
+            self.assertEqual(self._draws(), expected)
+
+    def test_strict_loader_refuses_a_crafted_payload(self):
+        import pickle
+
+        _SENTINEL_CALLS.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "rng_rank0.pt")
+            torch.save(_CraftedRngPayload(), path)
+            with self.assertRaises(pickle.UnpicklingError):
+                torch.load(path, map_location="cpu", weights_only=True)
+        self.assertEqual(_SENTINEL_CALLS, [])
 
 
 if __name__ == "__main__":

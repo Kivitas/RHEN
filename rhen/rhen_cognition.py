@@ -47,7 +47,7 @@ external model weights. They are standalone utilities: nothing here is wired int
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -440,6 +440,10 @@ def _balanced_clusters(
     return clusters, [medoid_of(c) for c in clusters]
 
 
+#: Number of option-list partitions a HierarchicalChoiceRouter keeps (LRU).
+_PARTITION_CACHE_SIZE = 8
+
+
 class HierarchicalChoiceRouter:
     """
     Two-level choice decomposition for large option sets.
@@ -451,15 +455,34 @@ class HierarchicalChoiceRouter:
     suggests a coarse-to-fine hierarchy for large option sets.
 
     This router implements that coarse-to-fine approach. Options are partitioned
-    into ``num_groups`` clusters by text similarity; group selection costs one
-    pass over ``G`` options (each group is represented by its medoid), and
-    discrimination costs one pass over only the members of the winning group.
-    Scored options therefore drop from ``K`` to ``G + |group|``, with
-    ``|group| <= ceil(K / G)``.
+    into ``num_groups`` clusters by text similarity. Level 1 scores one medoid
+    label per group. Level 2 scores the members of every group whose medoid is
+    close to the best group: a group is expanded when its medoid score is at
+    least ``best - EXPAND_MARGIN * |best|``, and at most ``MAX_EXPANDED_GROUPS``
+    groups are expanded, the highest-scoring first. A single medoid label can
+    misrepresent its group, so the margin lets a target survive a medoid that
+    ranks below the best group.
+
+    Bounds on work, with ``|group| <= ceil(K / G)``:
+
+    * level 1 scores exactly ``G`` labels;
+    * level 2 scores at most ``MAX_EXPANDED_GROUPS * ceil(K / G)`` options;
+    * so ``scored_options <= G + MAX_EXPANDED_GROUPS * ceil(K / G)``
+      (28 for K=77, G=8, MAX_EXPANDED_GROUPS=2), against K for the flat path.
+
+    Partitions are cached per instance for the most recent option lists
+    (``_PARTITION_CACHE_SIZE`` entries), keyed on ``num_groups`` and the string
+    form of each option, since the partition depends on nothing else.
 
     Reference (not verified by the author of this comment):
     https://laya.convaiinnovations.com/ (Banking77 discussion).
     """
+
+    #: Relative margin for expanding a group: groups scoring at least
+    #: ``best - EXPAND_MARGIN * |best|`` at level 1 are candidates for level 2.
+    EXPAND_MARGIN: float = 0.1
+    #: Upper bound on the number of groups expanded at level 2.
+    MAX_EXPANDED_GROUPS: int = 2
 
     def __init__(
         self,
@@ -470,6 +493,27 @@ class HierarchicalChoiceRouter:
         self.num_groups = max(2, int(num_groups))
         self.flat_threshold = int(flat_threshold)
         self.seed = seed
+        self._partition_cache: "OrderedDict[Tuple[int, Tuple[str, ...]], Tuple[List[List[int]], List[int]]]" = (
+            OrderedDict()
+        )
+
+    def _partition(self, options: Sequence[str]) -> Tuple[List[List[int]], List[int]]:
+        """
+        Return ``(clusters, medoids)`` for ``options``, computing them at most once per option list.
+
+        The result is a copy, so callers may mutate it without corrupting the cache.
+        """
+        key = (self.num_groups, tuple(str(o) for o in options))
+        cache = self._partition_cache
+        if key in cache:
+            cache.move_to_end(key)
+            clusters, medoids = cache[key]
+        else:
+            clusters, medoids = _balanced_clusters(options, self.num_groups)
+            cache[key] = (clusters, medoids)
+            while len(cache) > _PARTITION_CACHE_SIZE:
+                cache.popitem(last=False)
+        return [list(c) for c in clusters], list(medoids)
 
     def build_clusters(self, options: Sequence[str]) -> List[List[int]]:
         """
@@ -483,7 +527,7 @@ class HierarchicalChoiceRouter:
         randomness, so the same option list always yields the same partition,
         which keeps the routing auditable.
         """
-        clusters, _ = _balanced_clusters(options, self.num_groups)
+        clusters, _ = self._partition(options)
         return clusters
 
     def should_decompose(self, num_options: int) -> bool:
@@ -540,26 +584,38 @@ class HierarchicalChoiceRouter:
         # Level 1: score the groups. Each group is represented by its medoid
         # option, the member most similar to the rest of its group, so the
         # label reflects the whole group rather than its first few members.
-        clusters, medoids = _balanced_clusters(options, self.num_groups)
+        clusters, medoids = self._partition(options)
         group_labels = [options[m] for m in medoids]
         group_scores = list(scorer(group_labels))
         best_group = int(max(range(len(clusters)), key=lambda i: group_scores[i]))
 
-        # Level 2: score only the members of the winning group.
-        members = clusters[best_group]
-        member_labels = [options[i] for i in members]
+        # Expand the best group, plus any group whose medoid score is within
+        # EXPAND_MARGIN (relative to the best score) of it, up to
+        # MAX_EXPANDED_GROUPS groups in total, highest score first. The best
+        # group always qualifies, so at least one group is expanded.
+        best_score = group_scores[best_group]
+        threshold = best_score - self.EXPAND_MARGIN * abs(best_score)
+        cap = max(1, int(self.MAX_EXPANDED_GROUPS))
+        ranked = sorted(range(len(clusters)), key=lambda i: (-group_scores[i], i))
+        expanded = [i for i in ranked if group_scores[i] >= threshold][:cap]
+
+        # Level 2: score the union of the expanded groups' members, once each.
+        scored_indices = sorted({i for g in expanded for i in clusters[g]})
+        member_labels = [options[i] for i in scored_indices]
         member_scores = list(scorer(member_labels))
-        best_local = int(max(range(len(members)), key=lambda i: member_scores[i]))
-        chosen = members[best_local]
+        best_local = int(max(range(len(scored_indices)), key=lambda i: member_scores[i]))
+        chosen = scored_indices[best_local]
 
         return {
             "chosen_index": int(chosen),
             "chosen_option": options[chosen],
             "decomposed": True,
-            "scored_options": len(clusters) + len(members),
+            "scored_options": len(clusters) + len(scored_indices),
             "total_options": k,
             "clusters": clusters,
             "winning_cluster": best_group,
+            "expanded_clusters": expanded,
+            "scored_indices": scored_indices,
             "group_scores": group_scores,
             "member_scores": member_scores,
         }

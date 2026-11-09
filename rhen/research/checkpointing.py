@@ -14,9 +14,11 @@ so an interrupted save never becomes the resume point.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+import pickle
 import random
 import shutil
 from typing import Any, Dict, List, Optional
@@ -35,22 +37,81 @@ def checkpoint_dir(run_dir: str, step: int) -> str:
     return os.path.join(run_dir, "checkpoints", f"step_{step:08d}")
 
 
+#: Marker for the plain-type RNG format written by ``_rng_state``.
+RNG_FORMAT = "rhen-rng-v2"
+
+
+def _b64(raw: bytes) -> str:
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _unb64(text: str) -> bytes:
+    return base64.b64decode(text.encode("ascii"))
+
+
 def _rng_state() -> Dict[str, Any]:
-    state: Dict[str, Any] = {"python": random.getstate(), "torch": torch.get_rng_state()}
+    """
+    Every generator's state as plain Python types (dict, list, int, float, str, None).
+
+    Nothing here needs pickle globals, so the file loads under ``weights_only=True``.
+    Byte-valued generator states (torch and accelerator RNGs) are stored as base64.
+    """
+    py_version, py_internal, py_gauss = random.getstate()
+    state: Dict[str, Any] = {
+        "format": RNG_FORMAT,
+        "python": {"version": int(py_version), "internal": [int(x) for x in py_internal],
+                   "gauss_next": py_gauss},
+        "torch": _b64(bytes(torch.get_rng_state().tolist())),
+    }
     try:
         import numpy as np
 
-        state["numpy"] = np.random.get_state()
+        name, keys, pos, has_gauss, cached = np.random.get_state()
+        state["numpy"] = {
+            "bit_generator": str(name),
+            "keys": [int(x) for x in keys],
+            "pos": int(pos),
+            "has_gauss": int(has_gauss),
+            "cached_gaussian": float(cached),
+        }
     except ImportError:
         pass
     for name in ("cuda", "npu", "xpu"):
         module = getattr(torch, name, None)
         if module is not None and hasattr(module, "is_available") and module.is_available():
-            state[name] = module.get_rng_state_all()
+            state[name] = [_b64(bytes(t.tolist())) for t in module.get_rng_state_all()]
     return state
 
 
 def _set_rng_state(state: Dict[str, Any]) -> None:
+    """Restore a state written by ``_rng_state`` (or the legacy object format)."""
+    if state.get("format") != RNG_FORMAT:
+        _set_rng_state_legacy(state)
+        return
+    py = state["python"]
+    random.setstate((py["version"], tuple(py["internal"]), py["gauss_next"]))
+    torch.set_rng_state(torch.frombuffer(bytearray(_unb64(state["torch"])), dtype=torch.uint8).clone())
+    if "numpy" in state:
+        import numpy as np
+
+        npy = state["numpy"]
+        np.random.set_state((
+            npy["bit_generator"],
+            np.array(npy["keys"], dtype=np.uint32),
+            npy["pos"],
+            npy["has_gauss"],
+            npy["cached_gaussian"],
+        ))
+    for name in ("cuda", "npu", "xpu"):
+        module = getattr(torch, name, None)
+        if name in state and module is not None and module.is_available():
+            module.set_rng_state_all([
+                torch.frombuffer(bytearray(_unb64(s)), dtype=torch.uint8).clone() for s in state[name]
+            ])
+
+
+def _set_rng_state_legacy(state: Dict[str, Any]) -> None:
+    """Restore the pre-v2 layout, which stored Python and NumPy state objects directly."""
     random.setstate(state["python"])
     torch.set_rng_state(state["torch"])
     if "numpy" in state:
@@ -61,6 +122,26 @@ def _set_rng_state(state: Dict[str, Any]) -> None:
         module = getattr(torch, name, None)
         if name in state and module is not None and module.is_available():
             module.set_rng_state_all(state[name])
+
+
+def _load_rng_file(rng_path: str) -> Dict[str, Any]:
+    """
+    Read an ``rng_rank<k>.pt`` file, preferring ``weights_only=True``.
+
+    Files in the pre-v2 layout hold NumPy objects, which ``weights_only=True`` refuses.
+    Only those fall back to ``weights_only=False``, and only after a WARNING. That loader
+    executes code from a crafted file, so an old checkpoint must come from a trusted source.
+    """
+    try:
+        return torch.load(rng_path, map_location="cpu", weights_only=True)
+    except (pickle.UnpicklingError, RuntimeError):
+        logger.warning(
+            "RNG state file %s is in the old checkpoint format and cannot be read with "
+            "weights_only=True; loading it with weights_only=False. Only resume from a "
+            "trusted source: this loader can execute code from a crafted file.",
+            rng_path,
+        )
+        return torch.load(rng_path, map_location="cpu", weights_only=False)
 
 
 def model_state_dict(wrapped: torch.nn.Module, model: torch.nn.Module) -> Optional[Dict[str, torch.Tensor]]:
@@ -163,9 +244,9 @@ def load_checkpoint(
 
     Loading a checkpoint runs deserialization, so checkpoints must come from a trusted
     source: a crafted ``.pt`` file can execute code when it is loaded. ``model.pt`` and
-    ``optimizers.pt`` are read with ``weights_only=True``. ``rng_rank<k>.pt`` is read with
-    ``weights_only=False`` because it holds a NumPy RNG state, and a WARNING is logged
-    each time that happens.
+    ``optimizers.pt`` and ``rng_rank<k>.pt`` are read with ``weights_only=True``. The RNG
+    file is written in plain types since format v2. An RNG file in the old layout falls
+    back to ``weights_only=False`` after a WARNING; see ``_load_rng_file``.
     """
     if distmod.is_fsdp(wrapped):
         from torch.distributed.fsdp import FullStateDictConfig, StateDictType
@@ -192,12 +273,7 @@ def load_checkpoint(
 
     rng_path = os.path.join(path, f"rng_rank{ctx.rank}.pt")
     if os.path.exists(rng_path):
-        logger.warning(
-            "Loading %s with weights_only=False (NumPy RNG state needs full unpickling); "
-            "only resume from checkpoints produced by a trusted run",
-            rng_path,
-        )
-        _set_rng_state(torch.load(rng_path, map_location="cpu", weights_only=False))
+        _set_rng_state(_load_rng_file(rng_path))
     with open(os.path.join(path, "trainer_state.json"), "r", encoding="utf-8") as fh:
         return json.load(fh)
 
