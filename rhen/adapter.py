@@ -148,21 +148,26 @@ class HuggingFaceEncoderAdapter(nn.Module):
         if (mask_2d == 0).all():
             mask_2d = torch.ones_like(input_ids)
 
-        # Run through the external encoder. One deterministic call with the 2D padding mask.
-        # Only an encoder that does not accept an attention_mask keyword at all gets a retry
-        # without it; every other exception (device mismatch, shape error, ...) propagates.
+        # Run through the external encoder. The packed 4D block mask is tried first, because it
+        # carries the branch-isolation structure. Only a shape or type error moves on to the 2D
+        # padding mask. If that also fails, the original error is raised, chained. An encoder that
+        # does not accept an attention_mask keyword at all is called without one, and this is logged.
         if hasattr(self.encoder, "forward"):
             try:
-                enc_out = self.encoder(input_ids=input_ids, attention_mask=mask_2d)
-            except TypeError as exc:
-                msg = str(exc)
-                if "unexpected keyword argument" not in msg or "attention_mask" not in msg:
-                    raise
-                logger.debug(
-                    "Encoder %s does not accept attention_mask (%s); calling without it",
-                    type(self.encoder).__name__, msg,
-                )
-                enc_out = self.encoder(input_ids=input_ids)
+                enc_out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+            except (TypeError, ValueError) as first_exc:
+                if isinstance(first_exc, TypeError) and "unexpected keyword argument" in str(first_exc) \
+                        and "attention_mask" in str(first_exc):
+                    logger.debug(
+                        "Encoder %s does not accept attention_mask (%s); calling without it",
+                        type(self.encoder).__name__, first_exc,
+                    )
+                    enc_out = self.encoder(input_ids=input_ids)
+                else:
+                    try:
+                        enc_out = self.encoder(input_ids=input_ids, attention_mask=mask_2d)
+                    except (TypeError, ValueError) as second_exc:
+                        raise second_exc from first_exc
 
             if hasattr(enc_out, "last_hidden_state"):
                 h = enc_out.last_hidden_state

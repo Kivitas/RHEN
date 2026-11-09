@@ -126,13 +126,39 @@ def test_adapter_runtime_error_propagates_on_first_call():
     assert encoder.calls == 1
 
 
-def test_adapter_non_keyword_type_error_propagates_without_retry():
+def test_adapter_non_keyword_type_error_retries_with_2d_mask_then_propagates_chained():
     encoder = _BrokenMaskEncoder()
     adapter = _adapter(encoder)
 
-    with pytest.raises(TypeError, match="float tensor"):
+    with pytest.raises(TypeError, match="float tensor") as info:
         adapter.forward_rhen(_packed_sequence())
-    assert encoder.calls == 1
+    # One attempt with the 4D block mask, one with the 2D padding mask, then the error surfaces.
+    assert encoder.calls == 2
+    assert info.value.__cause__ is not None
+
+
+class _MaskRecordingEncoder(nn.Module):
+    """Records the rank of every attention_mask it receives."""
+
+    def __init__(self, emb: nn.Embedding):
+        super().__init__()
+        self.emb = emb
+        self.mask_ranks: list[int] = []
+
+    def forward(self, input_ids, attention_mask=None):
+        self.mask_ranks.append(attention_mask.dim())
+        return MockEncoderOutput(self.emb(input_ids))
+
+
+def test_adapter_sends_packed_4d_block_mask_first():
+    """The branch-isolation 4D mask must reach the encoder before any 2D fallback."""
+    emb = nn.Embedding(VOCAB, HIDDEN)
+    encoder = _MaskRecordingEncoder(emb)
+    adapter = _adapter(encoder)
+
+    adapter.forward_rhen(_packed_sequence())
+    assert encoder.mask_ranks[0] == 4
+    assert len(encoder.mask_ranks) == 1  # succeeds on the first call; no needless retry
 
 
 def test_adapter_falls_back_when_encoder_has_no_attention_mask_keyword(caplog):
