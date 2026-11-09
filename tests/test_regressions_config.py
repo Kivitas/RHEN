@@ -5,10 +5,11 @@ Covers:
     configs compare equal).
   * use_differential_attention: explicit values win; None follows use_diff_mla;
     no sticky state across re-initialisation.
-  * diff_attn_lambda_init flows from its own group field.
+  * diff_mla_lambda_init is the only DIFF lambda; diff_attn_lambda_init is gone.
   * Titans / episodic memory flags and titans_d_mem defaults.
-  * Changed defaults (fused kernels off, attn_logit_softcapping 0.0).
-  * Deprecated keys are still accepted as flat kwargs and as group fields.
+  * Changed defaults (attn_logit_softcapping 0.0).
+  * Removed no-op keys are no longer config fields (see test_config_legacy_keys
+    for the accept-and-warn behaviour).
   * muon_update_scale and the Muon step that uses it.
   * CheckpointedRecurrentCore (config precedence, training-only recompute,
     gradient equivalence, RNG-preserving recompute, delegation).
@@ -54,35 +55,31 @@ ROOT = (
     else os.path.dirname(os.path.abspath(__file__))
 )
 
-#: Deprecated keys as (group class, group attribute on EOSConfig, key).
-DEPRECATED_KEYS = [
-    (AttentionMLAConfig, "attention", "use_flash_attn"),
-    (AttentionMLAConfig, "attention", "enable_prefix_lm_mask"),
-    (YaRNConfig, "yarn", "yarn_scale_factor"),
-    (OrchestratorConfig, "orchestrator", "use_fused_recurrent_kernels"),
-    (RhenEngineConfig, "rhen_engine", "rhen_enable_three_layer_pipeline"),
-    (RhenEngineConfig, "rhen_engine", "rhen_enable_deep_reasoning"),
-    (RhenEngineConfig, "rhen_engine", "rhen_enable_qwen_reasoning"),
-    (RhenEngineConfig, "rhen_engine", "rhen_enable_deepseek_reasoning"),
-    (RhenEngineConfig, "rhen_engine", "rhen_semantic_layer_weight"),
-    (RhenEngineConfig, "rhen_engine", "rhen_reasoning_layer_weight"),
-    (RhenEngineConfig, "rhen_engine", "rhen_generation_layer_weight"),
-    (RhenEngineConfig, "rhen_engine", "rhen_enable_confidence_routing"),
-    (RhenEngineConfig, "rhen_engine", "rhen_min_semantic_confidence"),
-    (RhenEngineConfig, "rhen_engine", "rhen_max_reasoning_depth"),
-    (RhenEngineConfig, "rhen_engine", "rhen_confidence_threshold"),
-    (RhenEngineConfig, "rhen_engine", "rhen_meta_reasoning_cache_size"),
-    (RhenEngineConfig, "rhen_engine", "rhen_enable_meta_cognitive"),
+#: Removed no-op keys as (group class that used to own them, key). All 21 were
+#: deleted in RHEN 1.0.0; none may reappear as a field of its group.
+REMOVED_KEYS = [
+    (RecurrentLoopConfig, "enable_symplectic_loop"),
+    (AttentionMLAConfig, "use_flash_attn"),
+    (AttentionMLAConfig, "diff_attn_lambda_init"),
+    (AttentionMLAConfig, "enable_prefix_lm_mask"),
+    (YaRNConfig, "yarn_scale_factor"),
+    (RhenEngineConfig, "rhen_calib_loss_coef"),
+    (RhenEngineConfig, "rhen_enable_deep_reasoning"),
+    (RhenEngineConfig, "rhen_confidence_threshold"),
+    (RhenEngineConfig, "rhen_enable_qwen_reasoning"),
+    (RhenEngineConfig, "rhen_enable_deepseek_reasoning"),
+    (RhenEngineConfig, "rhen_meta_reasoning_cache_size"),
+    (RhenEngineConfig, "rhen_enable_three_layer_pipeline"),
+    (RhenEngineConfig, "rhen_semantic_layer_weight"),
+    (RhenEngineConfig, "rhen_reasoning_layer_weight"),
+    (RhenEngineConfig, "rhen_generation_layer_weight"),
+    (RhenEngineConfig, "rhen_enable_confidence_routing"),
+    (RhenEngineConfig, "rhen_min_semantic_confidence"),
+    (RhenEngineConfig, "rhen_max_reasoning_depth"),
+    (OrchestratorConfig, "use_fused_recurrent_kernels"),
+    (OrchestratorConfig, "checkpoint_policy"),
+    (OrchestratorConfig, "use_triton"),
 ]
-
-
-def _flipped(value):
-    """A valid, non-default value of the same type (bool checked before int)."""
-    if isinstance(value, bool):
-        return not value
-    if isinstance(value, int):
-        return value + 1
-    return value + 0.25
 
 
 def _tiny_config(**overrides) -> EOSConfig:
@@ -149,18 +146,19 @@ class TestDifferentialAttentionFlag(unittest.TestCase):
         self.assertIs(cfg.use_differential_attention, False)
 
 
-class TestDiffAttnLambdaInit(unittest.TestCase):
-    def test_diff_attn_lambda_init_flows_through(self):
-        cfg = EOSConfig(diff_attn_lambda_init=0.5)
-        self.assertEqual(cfg.diff_attn_lambda_init, 0.5)
+class TestDiffLambdaInit(unittest.TestCase):
+    def test_diff_mla_lambda_init_is_the_diff_lambda(self):
+        cfg = EOSConfig(diff_mla_lambda_init=0.3)
+        self.assertEqual(cfg.diff_mla_lambda_init, 0.3)
+        self.assertEqual(cfg.attention.diff_mla_lambda_init, 0.3)
+        self.assertEqual(EOSConfig().diff_mla_lambda_init, 0.8)
+
+    def test_removed_diff_attn_lambda_init_is_not_an_attribute(self):
+        with self.assertWarns(DeprecationWarning):
+            cfg = EOSConfig(diff_attn_lambda_init=0.5)
+        self.assertFalse(hasattr(cfg, "diff_attn_lambda_init"))
+        self.assertFalse(hasattr(cfg.attention, "diff_attn_lambda_init"))
         self.assertEqual(cfg.diff_mla_lambda_init, 0.8)
-
-    def test_diff_mla_lambda_init_does_not_leak_into_diff_attn(self):
-        self.assertEqual(EOSConfig(diff_mla_lambda_init=0.3).diff_attn_lambda_init, 0.8)
-
-    def test_group_object_value_flows_through(self):
-        cfg = EOSConfig(attention=AttentionMLAConfig(diff_attn_lambda_init=0.6))
-        self.assertEqual(cfg.diff_attn_lambda_init, 0.6)
 
 
 class TestTitansAndEpisodicMemoryFlags(unittest.TestCase):
@@ -193,9 +191,9 @@ class TestTitansAndEpisodicMemoryFlags(unittest.TestCase):
 
 
 class TestChangedDefaults(unittest.TestCase):
-    def test_fused_recurrent_kernels_default_off(self):
-        self.assertIs(EOSConfig().use_fused_recurrent_kernels, False)
-        self.assertIs(OrchestratorConfig().use_fused_recurrent_kernels, False)
+    def test_fused_recurrent_kernel_flag_is_removed(self):
+        self.assertNotIn("use_fused_recurrent_kernels", OrchestratorConfig.__dataclass_fields__)
+        self.assertFalse(hasattr(EOSConfig(), "use_fused_recurrent_kernels"))
 
     def test_attn_logit_softcapping_default_zero(self):
         self.assertEqual(EOSConfig().attn_logit_softcapping, 0.0)
@@ -209,21 +207,25 @@ class TestChangedDefaults(unittest.TestCase):
         self.assertEqual(cfg.loop_control, LoopControlConfig())
 
 
-class TestDeprecatedKeys(unittest.TestCase):
-    def test_deprecated_flat_kwargs_are_accepted(self):
-        for group_cls, _attr, key in DEPRECATED_KEYS:
+class TestRemovedNoOpKeys(unittest.TestCase):
+    def test_removed_keys_are_not_group_fields(self):
+        for group_cls, key in REMOVED_KEYS:
             with self.subTest(key=key):
-                value = _flipped(getattr(group_cls(), key))
-                cfg = EOSConfig(**{key: value})
-                self.assertEqual(getattr(cfg, key), value)
+                self.assertNotIn(key, group_cls.__dataclass_fields__)
 
-    def test_deprecated_group_fields_are_accepted(self):
-        for group_cls, attr, key in DEPRECATED_KEYS:
+    def test_removed_keys_are_not_flat_attributes(self):
+        cfg = EOSConfig()
+        for _group_cls, key in REMOVED_KEYS:
             with self.subTest(key=key):
-                value = _flipped(getattr(group_cls(), key))
-                group = group_cls(**{key: value})
-                self.assertEqual(getattr(group, key), value)
-                self.assertEqual(getattr(EOSConfig(**{attr: group}), key), value)
+                self.assertFalse(hasattr(cfg, key))
+
+    def test_removed_keys_are_not_in_the_flat_signature(self):
+        import inspect
+
+        params = inspect.signature(EOSConfig.__init__).parameters
+        for _group_cls, key in REMOVED_KEYS:
+            with self.subTest(key=key):
+                self.assertNotIn(key, params)
 
 
 class TestMuonUpdateScale(unittest.TestCase):

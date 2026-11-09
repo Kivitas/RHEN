@@ -12,7 +12,7 @@ Covers:
 - energy comes only from explicit scores or logits
 - schema mutations fail loudly or report no_mutation instead of inventing choices
 - the orchestrator runs a single decision layer and rejects generation requests
-- deprecated layer config keys are no longer read by rhen.py or unified_orchestrator.py
+- removed layer config keys are not mentioned by rhen.py or unified_orchestrator.py
 """
 
 import hashlib
@@ -52,7 +52,9 @@ from unified_orchestrator import UnifiedAIOrchestrator
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_HERE) if os.path.basename(_HERE) == "tests" else _HERE
 
-DEPRECATED_LAYER_CONFIG_KEYS = (
+#: Rhen-layer config keys removed in RHEN 1.0.0 (the three-layer pipeline and
+#: meta-reasoning enhancer were deleted). The SDK modules must not name them.
+REMOVED_LAYER_CONFIG_KEYS = (
     "rhen_enable_deep_reasoning",
     "rhen_confidence_threshold",
     "rhen_enable_deepseek_reasoning",
@@ -471,12 +473,12 @@ class TestDynamicSchemaMutation(unittest.TestCase):
             self.engine.dynamic_schema_mutation(state="Node-04", question=self.question, mutation=mutation)
 
 
-class TestDeprecatedConfigKeysAreNotRead(unittest.TestCase):
-    def test_rhen_and_orchestrator_do_not_mention_deprecated_layer_keys(self):
+class TestRemovedConfigKeysAreNotMentioned(unittest.TestCase):
+    def test_rhen_and_orchestrator_do_not_mention_removed_layer_keys(self):
         for filename in ("rhen.py", "unified_orchestrator.py"):
             with open(os.path.join(_REPO_ROOT, filename), encoding="utf-8") as handle:
                 source = handle.read()
-            for key in DEPRECATED_LAYER_CONFIG_KEYS:
+            for key in REMOVED_LAYER_CONFIG_KEYS:
                 with self.subTest(file=filename, key=key):
                     self.assertNotIn(key, source)
 
