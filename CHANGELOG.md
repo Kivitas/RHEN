@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Predictive layer** (`rhen/forecasting.py`):
+  - `Forecast`: median path plus nine quantiles (levels 0.1 to 0.9) per step, with `interval()`, `prob_exceeds()` and `uncertainty()` computed from the quantile function.
+  - `NaiveQuantileForecaster`: dependency-free random-walk baseline and default forecaster.
+  - `TimesFMForecaster`: adapter for TimesFM 3.0 (`timesfm3`). It requires `license_acknowledged=True` because the 3.0 weights are non-commercial only.
+  - Error metrics: `pinball_loss`, `interval_coverage`, `mase`, `brier_score`.
+- **Forecast-aware decisions** (`rhen/decision_pipeline.py`):
+  - `ForecastAwareDecider`: forecasts series, conditions `RhenEngine.choice` on the forecast summary, applies the policy, and gates execution through `approve` and `execute`.
+  - `DecisionPolicy`: deterministic gate returning `EXECUTE`, `NEEDS_APPROVAL`, `ABSTAIN` or `BLOCKED`, with reasons.
+  - `FeedbackLedger`: records decisions and outcomes, reports calibration (pinball loss, coverage, Brier), and round-trips through JSONL.
+- `forecast` optional extra: `pip install "rhen[forecast]"` (installs `timesfm[torch]>=3.0.2,<4`).
+- Example `examples/08_forecast_aware_decisions.py` (baseline forecaster by default; TimesFM only with `--timesfm --accept-noncommercial-license`).
+- Tests in `tests/test_forecast_integration.py`. The real TimesFM test runs only with `RHEN_TIMESFM_RUN_REAL=1` and a cached checkpoint.
+- README section "Predictive layer and forecast-aware decisions".
+
+---
+
 ## [1.0.0] - 2026-11-07
 
 ### Added

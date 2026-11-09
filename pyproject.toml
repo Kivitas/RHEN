@@ -49,6 +49,10 @@ tracking = [
     "tensorboard>=2.12",
     "wandb>=0.16",
 ]
+# TimesFM 3.0 forecaster. Its pretrained weights are non-commercial only; see README.
+forecast = [
+    "timesfm[torch]>=3.0.2,<4",
+]
 
 [project.scripts]
 rhen-decide = "cli.decide:main"
