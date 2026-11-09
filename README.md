@@ -464,11 +464,11 @@ Recent research (arXiv:2609.30266) demonstrated that LLM agents rewarded for tas
 | Component | Purpose | Key Metric / Guarantee |
 | :--- | :--- | :--- |
 | **RLCDOptimizer** | Reinforcement Learning for Calibrated Decisions | Confident-wrong decisions receive severe quadratic penalties; encourages well-calibrated confidence |
-| **DurationThresholdingHead (TDT)** | Decision Duration Thresholding | Dynamically exits recurrent reasoning loops when certainty threshold is met, **saving 25% - 50% compute** |
+| **DurationThresholdingHead (TDT)** | Decision Duration Thresholding | Dynamically exits recurrent reasoning loops when certainty threshold is met. TDT reduces loop iterations adaptively; the savings figure is not measured in this repo |
 | **HierarchicalChoiceRouter** | Coarse-to-fine candidate routing | Decomposes large action spaces (e.g. 77 intents in Banking77) into clusters; scores **<25% of options** without accuracy loss |
 | **OODRegressionGuard** | Held-out distribution regression monitor | Rejects updates that degrade held-out OOD accuracy beyond configured tolerance |
 | **EvidenceVerificationLattice** | Verification protocol | Seeded observer, permutation-invariance critic, and controlled baseline verifier |
-| **MultilingualDecisionRouter** | Cross-lingual decision transfer | Zero-shot routing across 10 languages (EN, DE, FR, ES, IT, NL, PT, HI, JA, KO) |
+| **MultilingualDecisionRouter** | Cross-lingual decision transfer | Heuristic router that routes by stopword and script rules across about 13 language tags (de, fr, pt, es, it, nl, en, hi, ja, ko, ru, ar, zh); no accuracy evaluation in the repo |
 
 ---
 
