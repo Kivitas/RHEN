@@ -416,7 +416,7 @@ def _tiny_training_state():
     return model, opt, sched
 
 
-def test_checkpoint_round_trip_restores_optimizer_scheduler_and_warns_on_rng_load(tmp_path, caplog):
+def test_checkpoint_round_trip_restores_state_without_legacy_rng_warning(tmp_path, caplog):
     ctx = DistributedContext()
     model, opt, sched = _tiny_training_state()
     model(torch.randn(3, 4)).sum().backward()
@@ -436,4 +436,20 @@ def test_checkpoint_round_trip_restores_optimizer_scheduler_and_warns_on_rng_loa
         opt2.state_dict()["state"][0]["exp_avg"], opt.state_dict()["state"][0]["exp_avg"],
     )
     assert sched2.last_epoch == sched.last_epoch
+    # The current RNG format is plain types, so no legacy unsafe-load warning is expected.
+    assert not any("weights_only=False" in r.getMessage() for r in caplog.records)
+
+
+def test_legacy_rng_file_is_refused_by_default_and_loads_only_with_opt_in(tmp_path, caplog):
+    import numpy as np
+    rng_path = tmp_path / "rng_rank0.pt"
+    # Old layout: a NumPy object that weights_only=True refuses.
+    torch.save({"numpy_state": np.random.get_state()}, rng_path)
+
+    with pytest.raises(RuntimeError, match="allow_unsafe_legacy_rng=True"):
+        ckpt._load_rng_file(str(rng_path))
+
+    with caplog.at_level(logging.WARNING, logger="rhen.research.checkpointing"):
+        loaded = ckpt._load_rng_file(str(rng_path), allow_unsafe_legacy_rng=True)
+    assert "numpy_state" in loaded
     assert any("weights_only=False" in r.getMessage() for r in caplog.records)

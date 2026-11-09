@@ -124,21 +124,29 @@ def _set_rng_state_legacy(state: Dict[str, Any]) -> None:
             module.set_rng_state_all(state[name])
 
 
-def _load_rng_file(rng_path: str) -> Dict[str, Any]:
+def _load_rng_file(rng_path: str, allow_unsafe_legacy_rng: bool = False) -> Dict[str, Any]:
     """
-    Read an ``rng_rank<k>.pt`` file, preferring ``weights_only=True``.
+    Read an ``rng_rank<k>.pt`` file with ``weights_only=True``.
 
-    Files in the pre-v2 layout hold NumPy objects, which ``weights_only=True`` refuses.
-    Only those fall back to ``weights_only=False``, and only after a WARNING. That loader
-    executes code from a crafted file, so an old checkpoint must come from a trusted source.
+    Files in the pre-v2 layout hold NumPy objects, which ``weights_only=True`` refuses. Those
+    are NOT loaded by default: loading them with ``weights_only=False`` executes code from a
+    crafted file. Pass ``allow_unsafe_legacy_rng=True`` to load one, and only do so for a
+    checkpoint from a trusted source. The load logs a WARNING when it takes that path.
     """
     try:
         return torch.load(rng_path, map_location="cpu", weights_only=True)
-    except (pickle.UnpicklingError, RuntimeError):
+    except (pickle.UnpicklingError, RuntimeError) as exc:
+        if not allow_unsafe_legacy_rng:
+            raise RuntimeError(
+                f"RNG state file {rng_path} is in the old checkpoint layout and cannot be read "
+                "with weights_only=True. Loading it executes code from the file. Pass "
+                "allow_unsafe_legacy_rng=True to load_checkpoint only if the checkpoint comes "
+                "from a trusted source, or re-save it with the current format."
+            ) from exc
         logger.warning(
-            "RNG state file %s is in the old checkpoint format and cannot be read with "
-            "weights_only=True; loading it with weights_only=False. Only resume from a "
-            "trusted source: this loader can execute code from a crafted file.",
+            "Loading legacy RNG state %s with weights_only=False because "
+            "allow_unsafe_legacy_rng=True. This executes code from the file; only resume from a "
+            "trusted source.",
             rng_path,
         )
         return torch.load(rng_path, map_location="cpu", weights_only=False)
@@ -239,14 +247,15 @@ def load_checkpoint(
     schedulers: List[Any],
     scaler: Any,
     ctx: distmod.DistributedContext,
+    allow_unsafe_legacy_rng: bool = False,
 ) -> Dict[str, Any]:
     """Restore everything saved by ``save_checkpoint``; returns the trainer state.
 
     Loading a checkpoint runs deserialization, so checkpoints must come from a trusted
     source: a crafted ``.pt`` file can execute code when it is loaded. ``model.pt`` and
     ``optimizers.pt`` and ``rng_rank<k>.pt`` are read with ``weights_only=True``. The RNG
-    file is written in plain types since format v2. An RNG file in the old layout falls
-    back to ``weights_only=False`` after a WARNING; see ``_load_rng_file``.
+    file is written in plain types since format v2. An RNG file in the old layout is refused
+    unless ``allow_unsafe_legacy_rng=True``; see ``_load_rng_file``.
     """
     if distmod.is_fsdp(wrapped):
         from torch.distributed.fsdp import FullStateDictConfig, StateDictType
@@ -273,7 +282,7 @@ def load_checkpoint(
 
     rng_path = os.path.join(path, f"rng_rank{ctx.rank}.pt")
     if os.path.exists(rng_path):
-        _set_rng_state(_load_rng_file(rng_path))
+        _set_rng_state(_load_rng_file(rng_path, allow_unsafe_legacy_rng=allow_unsafe_legacy_rng))
     with open(os.path.join(path, "trainer_state.json"), "r", encoding="utf-8") as fh:
         return json.load(fh)
 

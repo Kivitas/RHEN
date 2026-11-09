@@ -629,7 +629,7 @@ class RngCheckpointFormatTests(unittest.TestCase):
             with self.assertNoLogs("rhen.research.checkpointing", level="WARNING"):
                 ckpt._load_rng_file(path)
 
-    def test_old_layout_rng_file_warns_then_restores(self):
+    def test_old_layout_rng_file_is_refused_by_default_then_restores_on_opt_in(self):
         import random
 
         import numpy as np
@@ -647,9 +647,13 @@ class RngCheckpointFormatTests(unittest.TestCase):
             random.seed(0)
             np.random.seed(0)
             torch.manual_seed(0)
+            # Default: refused, because loading the old layout executes code from the file.
+            with self.assertRaisesRegex(RuntimeError, "allow_unsafe_legacy_rng=True"):
+                ckpt._load_rng_file(path)
+            # Explicit opt-in: loads, and logs a WARNING that names the unsafe path.
             with self.assertLogs("rhen.research.checkpointing", level="WARNING") as logs:
-                state = ckpt._load_rng_file(path)
-            self.assertIn("old checkpoint format", logs.output[0])
+                state = ckpt._load_rng_file(path, allow_unsafe_legacy_rng=True)
+            self.assertIn("weights_only=False", logs.output[0])
             self.assertIn("trusted source", logs.output[0])
             ckpt._set_rng_state(state)
             self.assertEqual(self._draws(), expected)
