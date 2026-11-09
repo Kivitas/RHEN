@@ -45,10 +45,12 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Removed no-op keys. RHEN 1.0.0 deleted these knobs because no code read them.
-# Configs and saved checkpoints written earlier may still carry them, so every
-# constructor below accepts them, drops them, and emits one DeprecationWarning
-# per call that names the keys. Nothing else about the config changes.
+# Removed no-op keys. These 21 knobs were DEPRECATED no-ops that no code read, and they
+# were removed in the release after 1.0.0. Configs and saved checkpoints written earlier
+# may still carry them, so every constructor below accepts them, drops them, and emits one
+# FutureWarning per call that names the keys. FutureWarning is shown under Python's default
+# warning filters, unlike DeprecationWarning, which is hidden for library callers.
+# Reading these attributes directly (e.g. cfg.use_triton) raises AttributeError.
 # ---------------------------------------------------------------------------
 _REMOVED_LEGACY_KEYS = (
     # RecurrentLoopConfig
@@ -93,10 +95,11 @@ def _pop_removed_legacy_keys(owner: str, *mappings: dict) -> None:
                 del mapping[key]
                 found.append(key)
     if found:
+        names = ", ".join(dict.fromkeys(found))
         warnings.warn(
-            f"{owner}: ignoring removed no-op config key(s) "
-            f"{', '.join(dict.fromkeys(found))}; they had no effect and can be deleted.",
-            DeprecationWarning,
+            f"{owner}: the config key(s) {names} were removed and are ignored. They had no "
+            f"effect; delete them from your config and code.",
+            FutureWarning,
             stacklevel=3,
         )
 

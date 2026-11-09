@@ -1,13 +1,15 @@
 """
 Regression tests for error-handling hardening.
 
-1. adapter: the external encoder gets one deterministic call with the 2D padding mask. A
-   RuntimeError from the encoder propagates instead of being replaced by a later signature
-   error. An encoder without an attention_mask keyword falls back to a call without it, and
-   the output matches the output of an encoder that accepts the mask.
+1. adapter: the packed 4D block mask is tried first. Any Exception from that attempt is retried
+   once with the 2D padding mask, and the 4D-to-2D downgrade is logged once per encoder. If the
+   2D attempt also fails, the original 4D error is raised with the second error as its cause.
+   An encoder without an attention_mask keyword falls back to a call without it, and the output
+   matches the output of an encoder that accepts the mask.
 2. rhen_packer: a failing state-depth function or latent-slot lookup logs one WARNING per
    site and the packed sequence is still produced.
-3. rhen_chunker: a tokenizer whose encode raises RuntimeError makes count_tokens return the
+3. rhen_chunker: a tokenizer whose encode raises any Exception (RuntimeError, or a plain
+   Exception subclass such as the ones HF tokenizers raise) makes count_tokens return the
    character estimate and log one WARNING.
 4. fused_swiglu: a failing torch.compile logs a WARNING and writes nothing to stdout; a
    failing compiled forward logs at DEBUG and falls back to the standard implementation.
@@ -59,21 +61,6 @@ class _NoMaskEncoder(nn.Module):
         return MockEncoderOutput(self.emb(input_ids))
 
 
-class _DeviceMismatchEncoder(nn.Module):
-    """Raises a RuntimeError on the first call; later calls would succeed."""
-
-    def __init__(self, emb: nn.Embedding):
-        super().__init__()
-        self.emb = emb
-        self.calls = 0
-
-    def forward(self, input_ids, attention_mask=None):
-        self.calls += 1
-        if self.calls == 1:
-            raise RuntimeError("Expected all tensors to be on the same device, but found cpu and cuda:0")
-        return MockEncoderOutput(self.emb(input_ids))
-
-
 class _BrokenMaskEncoder(nn.Module):
     """Raises a TypeError that is about the mask's content, not a missing keyword."""
 
@@ -115,15 +102,98 @@ def _adapter(encoder: nn.Module) -> HuggingFaceEncoderAdapter:
     )
 
 
-def test_adapter_runtime_error_propagates_on_first_call():
+class _Rank4RejectingEncoder(nn.Module):
+    """Raises a RuntimeError on the 4D block mask and accepts the 2D padding mask."""
+
+    def __init__(self, emb: nn.Embedding):
+        super().__init__()
+        self.emb = emb
+        self.mask_ranks: list[int] = []
+
+    def forward(self, input_ids, attention_mask=None):
+        self.mask_ranks.append(attention_mask.dim())
+        if attention_mask.dim() == 4:
+            raise RuntimeError("mask rank 4 not supported by this kernel")
+        return MockEncoderOutput(self.emb(input_ids))
+
+
+class _BothMasksFailEncoder(nn.Module):
+    """Fails on every mask, with a different message for each rank."""
+
+    def __init__(self):
+        super().__init__()
+        self.mask_ranks: list[int] = []
+
+    def forward(self, input_ids, attention_mask=None):
+        self.mask_ranks.append(attention_mask.dim())
+        if attention_mask.dim() == 4:
+            raise RuntimeError("4D boom")
+        raise RuntimeError("2D boom")
+
+
+def test_adapter_runtime_error_on_4d_mask_retries_with_2d_and_returns_output(caplog):
     emb = nn.Embedding(VOCAB, HIDDEN)
-    encoder = _DeviceMismatchEncoder(emb)
+    encoder = _Rank4RejectingEncoder(emb)
     adapter = _adapter(encoder)
 
-    with pytest.raises(RuntimeError, match="same device"):
+    with caplog.at_level(logging.WARNING, logger="rhen.adapter"):
+        out = adapter.forward_rhen(_packed_sequence())
+
+    # The base code retried on any Exception, so a RuntimeError from the 4D attempt must not
+    # surface when the 2D retry succeeds.
+    assert encoder.mask_ranks == [4, 2]
+    assert len(out) == 1
+    assert out[0]["probabilities"].shape[-1] == 2
+    assert torch.isfinite(out[0]["probabilities"]).all()
+
+
+def test_adapter_both_attempts_fail_reraises_original_4d_error_chained_to_2d_error():
+    encoder = _BothMasksFailEncoder()
+    adapter = _adapter(encoder)
+
+    with pytest.raises(RuntimeError, match="4D boom") as info:
         adapter.forward_rhen(_packed_sequence())
-    # Exactly one attempt: no retry that could hide the real error behind a later failure.
-    assert encoder.calls == 1
+
+    assert encoder.mask_ranks == [4, 2]
+    # The first failure is the one raised; the second failure is its cause, so neither is hidden.
+    assert isinstance(info.value.__cause__, RuntimeError)
+    assert "2D boom" in str(info.value.__cause__)
+
+
+def test_adapter_mask_downgrade_logs_warning_once_per_encoder(caplog):
+    emb = nn.Embedding(VOCAB, HIDDEN)
+    encoder = _Rank4RejectingEncoder(emb)
+    adapter = _adapter(encoder)
+    packed = _packed_sequence()
+
+    with caplog.at_level(logging.WARNING, logger="rhen.adapter"):
+        adapter.forward_rhen(packed)
+        adapter.forward_rhen(packed)
+
+    downgrade = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "2D padding mask" in r.getMessage()
+    ]
+    assert len(downgrade) == 1, "one warning per encoder instance, not per call"
+    assert "branch isolation" in downgrade[0].getMessage().lower()
+    assert "Branch isolation may not hold" in downgrade[0].getMessage()
+
+    # A new encoder instance gets its own warning.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="rhen.adapter"):
+        adapter.encoder = _Rank4RejectingEncoder(emb)
+        adapter.forward_rhen(packed)
+    assert sum("2D padding mask" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_adapter_clean_4d_path_does_not_log_downgrade(caplog):
+    emb = nn.Embedding(VOCAB, HIDDEN)
+    adapter = _adapter(_MaskRecordingEncoder(emb))
+
+    with caplog.at_level(logging.WARNING, logger="rhen.adapter"):
+        adapter.forward_rhen(_packed_sequence())
+
+    assert not any("2D padding mask" in r.getMessage() for r in caplog.records)
 
 
 def test_adapter_non_keyword_type_error_retries_with_2d_mask_then_propagates_chained():
@@ -259,6 +329,31 @@ def test_chunker_count_tokens_falls_back_to_character_estimate_and_warns(monkeyp
     assert len(warnings_) == 1
     assert "character-count estimate" in warnings_[0].getMessage()
     assert "RuntimeError" in warnings_[0].getMessage()
+
+
+class _PlainExceptionTokenizer:
+    """WordLevel-style fake: encode raises a plain Exception subclass, not RuntimeError."""
+
+    class BackendError(Exception):
+        pass
+
+    def encode(self, text, *args, **kwargs):
+        raise self.BackendError("Token not found in vocabulary and no [UNK] token defined")
+
+
+def test_chunker_count_tokens_falls_back_on_plain_exception_subclass_and_warns(monkeypatch, caplog):
+    monkeypatch.setattr(chunker_mod, "_TOKENIZER_FALLBACK_LOGGED", False)
+    chunker = chunker_mod.SemanticBoundaryChunker(tokenizer=_PlainExceptionTokenizer())
+    text = "y" * 30
+    expected = int(len(text) / chunker_mod._CHARS_PER_TOKEN)
+
+    with caplog.at_level(logging.WARNING, logger="rhen.rhen_chunker"):
+        assert chunker.count_tokens(text) == expected
+
+    warnings_ = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings_) == 1
+    assert "character-count estimate" in warnings_[0].getMessage()
+    assert "BackendError" in warnings_[0].getMessage()
 
 
 # --------------------------------------------------------------------------------------

@@ -9,9 +9,9 @@
 [![arXiv 2609.29327](https://img.shields.io/badge/arXiv-2609.29327-b31b1b.svg)](https://arxiv.org/abs/2609.29327)
 [![arXiv 2609.28879](https://img.shields.io/badge/arXiv-2609.28879-b31b1b.svg)](https://arxiv.org/abs/2609.28879)
 
-**RHEN** is a production-grade, non-autoregressive **JEV-type (Joint Evaluation)** decision engine specifically architected for Autonomous Agents, Tool Orchestration, and Mission-Critical Control Systems.
+**RHEN** is a non-autoregressive **JEV-type (Joint Evaluation)** decision engine for Autonomous Agents and Tool Orchestration. It is alpha-quality research code, not validated for production or safety-critical use; see [Known limitations](#known-limitations).
 
-Traditional agentic architectures rely on autoregressive Large Language Models (LLMs) generating token-by-token JSON strings. This approach suffers from quadratic context latency, uncalibrated hallucinated confidence, parser breakage, and vulnerability to prompt injection. **RHEN eliminates token generation for decisions**: it packs the entire environment state alongside multiple typed decision branches into a single sequence, evaluates all decisions simultaneously in a **single forward pass**, and enforces rigorous statistical and cryptographic safety guarantees.
+Traditional agentic architectures rely on autoregressive Large Language Models (LLMs) generating token-by-token JSON strings. This approach suffers from quadratic context latency, uncalibrated hallucinated confidence, parser breakage, and vulnerability to prompt injection. **RHEN eliminates token generation for decisions**: it packs the entire environment state alongside multiple typed decision branches into a single sequence, evaluates all decisions simultaneously in a **single forward pass**, and implements statistical and cryptographic safety mechanisms. What is measured and what is not is listed under [Known limitations](#known-limitations).
 
 ### 3-Line Quickstart
 
@@ -99,8 +99,8 @@ RHEN replaces autoregression with **Joint Evaluation (JEV)**:
 | :--- | :--- | :--- |
 | **Inference Latency** | $O(N)$ sequential autoregressive token steps (200ms - 3000ms+) | **$O(1)$ single forward pass**. Design target: <15ms on GPU, <50ms CPU (not yet benchmarked in this repo; see [Known limitations](#known-limitations)) |
 | **Decision Representation** | Free-form text / JSON strings subject to syntax errors | **Typed Semantic Primitives** (`Choice`, `Range`, `Extract`, etc.) |
-| **Confidence Calibration** | Uncalibrated token-level softmax; overconfident on hallucinations | **Empirically calibrated probabilities** with dynamic entropy temperature |
-| **Statistical Guarantees** | None (heuristic prompting) | **$1 - \alpha$ Split-Conformal Prediction** coverage guarantees |
+| **Confidence Calibration** | Uncalibrated token-level softmax; overconfident on hallucinations | Temperature scaling and a Brier term are implemented; calibration is not yet measured on labelled data in this repo. |
+| **Statistical Guarantees** | None (heuristic prompting) | Split-conformal and adaptive conformal machinery is implemented and unit-tested on synthetic data; empirical coverage on labelled data is not yet measured. |
 | **Out-of-Distribution (OOD)**| Confidently hallucinated answers on unfamiliar distributions | **Helmholtz Free Energy** and **Geometric Convex-Hull Abstention** |
 | **Safety & Authorization** | Post-hoc regex or vulnerable prompt guardrails | **Cryptographic HMAC-SHA256 Action Cards**, **Dual-Custody**, & **BFT Consensus** |
 | **Auditability** | In-process log files easily deleted by rogue agents (arXiv:2609.30266) | **Out-of-Band Audit Ledger** (records already emitted cannot be rewritten undetected, but a compromised agent can still emit false records; see [Known limitations](#known-limitations)) and **Merkle Tree Inclusion Proofs** (design target: <0.1ms, not yet benchmarked) |
@@ -292,7 +292,7 @@ flowchart LR
     subgraph Aggregation["Calibration & Gating"]
         WeightedSum["Weighted Bilinear Fusion<br/>w_h = Softmax(head_logits)"]
         TempScale["Entropy Temperature tau(q)<br/>Softmax(S / tau(q))"]
-        Conformal["Split-Conformal Set C(S)<br/>Coverage Guarantee 1 - alpha"]
+        Conformal["Split-Conformal Set C(S)<br/>Target coverage 1 - alpha (not yet measured)"]
         AbstentionGate["Geometric Abstention Gate<br/>Free Energy + Convex Hull"]
     end
 
@@ -373,7 +373,7 @@ print(results[0]["chosen_option"])
 Autonomous agents operating critical infrastructure cannot afford to guess when uncertain. RHEN provides four layers of statistical and geometric protection.
 
 ### Split-Conformal Prediction Coverage ($1 - \alpha$)
-RHEN implements finite-sample distribution-free split-conformal prediction. For any desired coverage guarantee $1 - \alpha$ (e.g., 95% certainty):
+RHEN implements finite-sample distribution-free split-conformal prediction, targeting coverage $1 - \alpha$ (e.g., 95%). Split-conformal and adaptive conformal machinery is implemented and unit-tested on synthetic data; empirical coverage on labelled data is not yet measured in this repo:
 
 $$C(S) = \left\{ o_k \in \mathcal{O} : P(o_k \mid S) \ge 1.0 - \hat{q} \right\}$$
 
@@ -469,7 +469,7 @@ Recent research (arXiv:2609.30266) demonstrated that LLM agents rewarded for tas
 | :--- | :--- | :--- |
 | **RLCDOptimizer** | Reinforcement Learning for Calibrated Decisions | Confident-wrong decisions receive severe quadratic penalties; encourages well-calibrated confidence |
 | **DurationThresholdingHead (TDT)** | Decision Duration Thresholding | Dynamically exits recurrent reasoning loops when certainty threshold is met. TDT reduces loop iterations adaptively; the savings figure is not measured in this repo |
-| **HierarchicalChoiceRouter** | Coarse-to-fine candidate routing | Decomposes large action spaces (e.g. 77 intents in Banking77) into clusters; scores **<25% of options** without accuracy loss |
+| **HierarchicalChoiceRouter** | Coarse-to-fine candidate routing | The hierarchical router narrows the candidate set before scoring. Its accuracy against a flat scorer is not measured in this repo; see `benchmarks/banking77/README.md` for the measured baselines. |
 | **OODRegressionGuard** | Held-out distribution regression monitor | Rejects updates that degrade held-out OOD accuracy beyond configured tolerance |
 | **EvidenceVerificationLattice** | Verification protocol | Seeded observer, permutation-invariance critic, and controlled baseline verifier |
 | **MultilingualDecisionRouter** | Cross-lingual decision transfer | Heuristic router that routes by stopword and script rules across about 13 language tags (de, fr, pt, es, it, nl, en, hi, ja, ko, ru, ar, zh); no accuracy evaluation in the repo |
@@ -796,10 +796,16 @@ Key verified properties:
 
 ## Known limitations
 
+- **Not validated for production or safety-critical use.** RHEN is alpha-quality research code. This repository documents no deployment record or safety evaluation.
+- **Calibration is not measured.** Temperature scaling, a Brier term and ECE reporting are implemented. No calibration result on labelled data is committed, so the reliability of the output probabilities is unknown.
+- **Conformal coverage is not measured.** Split-conformal and adaptive conformal code is unit-tested on synthetic data. Empirical coverage on labelled data, at any stated alpha, is not reported.
+- **Router accuracy is not measured against a flat scorer.** The `HierarchicalChoiceRouter` has no committed accuracy comparison with a flat scorer. The measured Banking77 baselines are in `benchmarks/banking77/README.md`.
+- **No trained RHEN decision head is committed.** The only RHEN accuracy figure in the Banking77 benchmark comes from an untrained model on 3 examples (0 of 3 correct). It is a pipeline check, not an accuracy estimate.
+- **No comparison has been run** against JEV, Kev, Open-Jev, LAYA or Microsoft-Decision-1. Figures that those projects publish are their own and are not reproduced or ranked here.
 - **Audit threat model.** The audit ledger does not prove that logged content is true. A compromised agent can emit new records with false content, and they will verify. A silent stop at the end of the stream is not detectable from the stored records alone. Local sealing modes hold the key inside the agent process. See [Out-of-Band Audit Trail](#out-of-band-audit-trail).
 - **Benchmark numbers are unreproduced.** The latency and proof-timing figures in this README (<15ms on GPU, <50ms on CPU, <0.1ms for Merkle proofs) are design targets. No committed benchmark output exists yet. `examples/06_latency_and_jev_comparison.py` measures decision latency on your hardware and model, but no script in the repository times Merkle proof verification.
-- **Checkpoint loading trusts the file.** `rhen/research/checkpointing.py` loads optimizer and RNG state with `torch.load(..., weights_only=False)`. Load checkpoints only from a trusted source.
-- **Large flat configuration.** `RhenConfig` (an alias of `EOSConfig` in `rhen/config.py`) takes about 150 named keyword parameters, plus `**kwargs`. Check parameter names against the source before use.
+- **Checkpoint loading trusts the file.** `rhen/research/checkpointing.py` loads the RNG state files (`rng_rank*.pt`) with `torch.load(..., weights_only=False)`, which can execute code embedded in a crafted file. Optimizer and model files load with `weights_only=True`. Load checkpoints only from a trusted source.
+- **Large flat configuration.** `RhenConfig` (an alias of `EOSConfig` in `rhen/config.py`) takes 128 named keyword parameters, plus `**kwargs`. Check parameter names against the source before use.
 
 ---
 
