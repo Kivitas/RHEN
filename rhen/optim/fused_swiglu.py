@@ -1,7 +1,11 @@
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 class FusedSwiGLU(nn.Module):
     """
@@ -41,9 +45,12 @@ class FusedSwiGLU(nn.Module):
                     fullgraph=True,
                 )
                 self._compile_enabled = True
-                print(f"[FusedSwiGLU] torch.compile enabled with mode='{compile_mode}'")
+                logger.info("torch.compile enabled with mode='%s'", compile_mode)
             except Exception as e:
-                print(f"[FusedSwiGLU] torch.compile failed ({e}), using standard implementation")
+                logger.warning(
+                    "torch.compile failed (%s: %s); using standard implementation",
+                    type(e).__name__, e,
+                )
         
         self._residual_out = True
     
@@ -109,6 +116,10 @@ class FusedSwiGLU(nn.Module):
                         gate_weight, gate_bias, up_weight, up_bias, x
                     )
                 except Exception:
+                    logger.debug(
+                        "Compiled SwiGLU forward failed; disabling it and using the standard implementation",
+                        exc_info=True,
+                    )
                     self._compile_enabled = False
         
         # Fallback to standard implementation
