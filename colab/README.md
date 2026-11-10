@@ -13,19 +13,33 @@ to `"fp16"` in `configs/colab_lm_synth_1b.json`.
 ## Paste this into one Colab cell
 
 ```python
-import os, subprocess, torch
+import os, subprocess, time, torch
 assert torch.cuda.is_available(), "No GPU: Runtime -> Change runtime type -> A100 or L4"
 print("GPU:", torch.cuda.get_device_name(0))
 
 from google.colab import drive
-drive.mount("/content/drive")  # the first run asks you to sign in once
+mounted = False
+for attempt in range(2):
+    try:
+        drive.mount("/content/drive", force_remount=(attempt > 0))
+        mounted = True
+        break
+    except Exception as exc:
+        print(f"Drive mount attempt {attempt + 1} failed: {exc}")
+        time.sleep(5)
+
+if mounted:
+    BASE = "/content/drive/MyDrive/rhen"
+else:
+    BASE = "/content/rhen_local"
+    print("WARNING: Google Drive did not mount. The corpus and checkpoints will be lost if the runtime disconnects.")
 
 def sh(cmd):
     subprocess.run(cmd, shell=True, check=True)
 
-DRIVE_DATA = "/content/drive/MyDrive/rhen/data/corpus_synth_1b"    # saved tokens (survive disconnects)
-DRIVE_RUN = "/content/drive/MyDrive/rhen/runs/colab_lm_synth_1b"   # checkpoints (survive disconnects)
-LOCAL_DATA = "/content/RHEN/data/corpus_synth_1b"                  # fast local copy used for training
+DRIVE_DATA = f"{BASE}/data/corpus_synth_1b"    # saved tokens (survive disconnects when Drive is mounted)
+DRIVE_RUN = f"{BASE}/runs/colab_lm_synth_1b"   # checkpoints (survive disconnects when Drive is mounted)
+LOCAL_DATA = "/content/RHEN/data/corpus_synth_1b"  # fast local copy used for training
 
 sh("rm -rf /content/RHEN && git clone -q -b colab-lm-synth-1b https://github.com/Kivitas/RHEN.git /content/RHEN")
 os.chdir("/content/RHEN")
@@ -33,16 +47,16 @@ os.environ["PYTHONPATH"] = "/content/RHEN"
 sh('pip install -q "transformers>=4.40,<6" "numpy>=1.24"')
 
 if os.path.exists(f"{DRIVE_DATA}/generator.json"):
-    print("Found the corpus on Drive; copying it to local disk.")
+    print("Found the corpus in storage; copying it to local disk.")
     sh(f"mkdir -p {LOCAL_DATA} && cp {DRIVE_DATA}/train.bin {DRIVE_DATA}/val.bin {DRIVE_DATA}/meta.json {LOCAL_DATA}/ && cp {DRIVE_DATA}/generator.json {LOCAL_DATA}/")
 else:
-    print("No corpus on Drive; building it (about 3-5 minutes).")
+    print("No corpus in storage; building it (about 3-5 minutes).")
     sh(f"python tools/make_synthetic_corpus.py --out {LOCAL_DATA}")
     sh(f"mkdir -p {DRIVE_DATA} && cp {LOCAL_DATA}/train.bin {LOCAL_DATA}/val.bin {LOCAL_DATA}/meta.json {DRIVE_DATA}/ && cp {LOCAL_DATA}/generator.json {DRIVE_DATA}/")
 
 sh(f"python tools/make_synthetic_corpus.py --out {LOCAL_DATA}")  # checks the local copy; skips if complete
 
-# Training. Checkpoints go to Drive, so re-running this cell after a disconnect resumes.
+# Training. Checkpoints go to storage, so re-running this cell after a disconnect resumes.
 sh(f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} --set run_dir={DRIVE_RUN}")
 ```
 
