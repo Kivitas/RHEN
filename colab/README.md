@@ -35,7 +35,14 @@ else:
     print("WARNING: Google Drive did not mount. The corpus and checkpoints will be lost if the runtime disconnects.")
 
 def sh(cmd):
-    subprocess.run(cmd, shell=True, check=True)
+    """Run a shell command, stream its output, and show the last lines if it fails."""
+    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    tail = []
+    for line in proc.stdout:
+        print(line, end="")
+        tail = (tail + [line])[-40:]
+    if proc.wait() != 0:
+        raise RuntimeError(f"Command failed with exit code {proc.returncode}: {cmd}")
 
 DRIVE_DATA = f"{BASE}/data/corpus_synth_1b"    # saved tokens (survive disconnects when Drive is mounted)
 DRIVE_RUN = f"{BASE}/runs/colab_lm_synth_1b"   # checkpoints (survive disconnects when Drive is mounted)
@@ -44,6 +51,7 @@ LOCAL_DATA = "/content/RHEN/data/corpus_synth_1b"  # fast local copy used for tr
 sh("rm -rf /content/RHEN && git clone -q -b colab-lm-synth-1b https://github.com/Kivitas/RHEN.git /content/RHEN")
 os.chdir("/content/RHEN")
 os.environ["PYTHONPATH"] = "/content/RHEN"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 sh('pip install -q "transformers>=4.40,<6" "numpy>=1.24"')
 
 if os.path.exists(f"{DRIVE_DATA}/generator.json"):
