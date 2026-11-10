@@ -34,11 +34,9 @@ else:
     BASE = "/content/rhen_local"
     print("WARNING: Google Drive did not mount. The corpus and checkpoints will be lost if the runtime disconnects.")
 
-os.chdir("/content")  # never run from inside /content/RHEN, because the cell deletes it
-
-def sh(cmd):
-    """Run a shell command from /content, stream its output, and raise if it fails."""
-    proc = subprocess.Popen(cmd, shell=True, cwd="/content", stdout=subprocess.PIPE,
+def sh(cmd, cwd="/content/RHEN"):
+    """Run a shell command in the repo (or in the given directory), stream its output, and raise if it fails."""
+    proc = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
     for line in proc.stdout:
         print(line, end="")
@@ -49,7 +47,8 @@ DRIVE_DATA = f"{BASE}/data/corpus_synth_1b"    # saved tokens (survive disconnec
 DRIVE_RUN = f"{BASE}/runs/colab_lm_synth_1b"   # checkpoints (survive disconnects when Drive is mounted)
 LOCAL_DATA = "/content/RHEN/data/corpus_synth_1b"  # fast local copy used for training
 
-sh("rm -rf /content/RHEN && git clone -q -b colab-lm-synth-1b https://github.com/Kivitas/RHEN.git /content/RHEN")
+# The clone deletes /content/RHEN, so run it from /content.
+sh("rm -rf /content/RHEN && git clone -q -b colab-lm-synth-1b https://github.com/Kivitas/RHEN.git /content/RHEN", cwd="/content")
 os.chdir("/content/RHEN")
 os.environ["PYTHONPATH"] = "/content/RHEN"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
