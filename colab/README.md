@@ -48,9 +48,10 @@ def sh(cmd, cwd="/content/RHEN"):
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {cmd}")
 
 DRIVE_DATA = f"{BASE}/data/corpus_decision_1b"      # saved tokens (survive disconnects when Drive is mounted)
-PRESET = "base"                                     # model size: "small" (45M params) or "base" (246M params)
+PRESET = "small"                                    # model size: "small" (45M params) or "base" (246M params)
+SEQ_LEN = 2048                                      # tokens per sequence; 2048 is the small model's position limit
 MAX_HOURS = 60                                      # the cell stops before training if the estimate is longer than this
-DRIVE_RUN = f"{BASE}/runs/colab_decision_{PRESET}_1p5ep"  # separate folder: a different model cannot resume the small one
+DRIVE_RUN = f"{BASE}/runs/colab_decision_{PRESET}_seq{SEQ_LEN}_1p5ep"  # separate folder: a different setup cannot resume this one
 # Stage the corpus in /dev/shm, which is RAM-backed, so training reads from memory.
 # Fall back to the normal disk if /dev/shm has less than 6 GB free.
 SHM_FREE = shutil.disk_usage("/dev/shm").free if os.path.exists("/dev/shm") else 0
@@ -77,10 +78,10 @@ else:
 
 sh(f"python tools/make_decision_corpus.py --out {LOCAL_DATA}")  # checks the local copy; skips if complete
 
-# 1.5 epochs of the training split, counted in tokens: 32 sequences * 1024 tokens per step.
+# 1.5 epochs of the training split, counted in tokens: 32 sequences * SEQ_LEN tokens per step.
 with open(f"{LOCAL_DATA}/meta.json", encoding="utf-8") as fh:
     TRAIN_TOKENS = json.load(fh)["train_tokens"]
-TOTAL_STEPS = round(1.5 * TRAIN_TOKENS / (32 * 1024))
+TOTAL_STEPS = round(1.5 * TRAIN_TOKENS / (32 * SEQ_LEN))
 print(f"train tokens: {TRAIN_TOKENS:,}  ->  1.5 epochs = {TOTAL_STEPS:,} steps")
 
 # Try micro-batch sizes 32, 16, 8 and 4, with and without torch.compile. Each combination that fits
@@ -90,7 +91,7 @@ import re
 def measure(micro, compile_on):
     accum = 32 // micro
     cmd = (f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
-           f"--set preset={PRESET} --set run_dir=/content/smoke_{micro}_{int(compile_on)} --set resume=never "
+           f"--set preset={PRESET} --set seq_len={SEQ_LEN} --set run_dir=/content/smoke_{micro}_{int(compile_on)} --set resume=never "
            f"--set micro_batch_size={micro} --set grad_accum_steps={accum} --set compile={str(compile_on).lower()} "
            f"--set max_steps=6 --set log_every=1 --set eval_every=1000 --set save_every=1000 --set tensorboard=false")
     proc = subprocess.run(cmd, shell=True, cwd="/content/RHEN", capture_output=True, text=True)
@@ -112,7 +113,7 @@ assert fitting, "No setting fit; see the output above"
 MICRO, COMPILE = max(fitting, key=fitting.get)
 ACCUM = 32 // MICRO
 TPS = fitting[(MICRO, COMPILE)]
-HOURS = TOTAL_STEPS * 32 * 1024 / TPS / 3600
+HOURS = TOTAL_STEPS * 32 * SEQ_LEN / TPS / 3600
 print(f"Using micro_batch {MICRO} x accum {ACCUM}, compile={COMPILE}, preset={PRESET}: {TPS:,.0f} tokens/sec.")
 print(f"Estimated training time: {HOURS:.1f} hours for {TOTAL_STEPS:,} steps (limit {MAX_HOURS} hours).")
 assert HOURS <= MAX_HOURS, f"Estimate {HOURS:.1f} h is over MAX_HOURS={MAX_HOURS}. Lower MAX_HOURS or pick the small preset."
@@ -123,7 +124,7 @@ subprocess.Popen("nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,m
 
 # Training. Checkpoints go to storage, so re-running this cell after a disconnect resumes.
 sh(f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
-   f"--set preset={PRESET} --set run_dir={DRIVE_RUN} --set max_steps={TOTAL_STEPS} --set save_every=1000 --set eval_every=1000 "
+   f"--set preset={PRESET} --set seq_len={SEQ_LEN} --set run_dir={DRIVE_RUN} --set max_steps={TOTAL_STEPS} --set save_every=1000 --set eval_every=1000 "
    f"--set micro_batch_size={MICRO} --set grad_accum_steps={ACCUM} --set compile={str(COMPILE).lower()}")
 ```
 
