@@ -44,7 +44,9 @@ def sh(cmd, cwd="/content/RHEN"):
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {cmd}")
 
 DRIVE_DATA = f"{BASE}/data/corpus_synth_1b"    # saved tokens (survive disconnects when Drive is mounted)
-DRIVE_RUN = f"{BASE}/runs/colab_lm_synth_1b"   # checkpoints (survive disconnects when Drive is mounted)
+DRIVE_RUN = f"{BASE}/runs/colab_lm_synth_1p5ep"  # checkpoints for this run (survive disconnects when Drive is mounted)
+# 1.5 epochs = 1.5 * 991,036,046 train tokens / (32 sequences * 1024 tokens per step)
+TOTAL_STEPS = 45366
 LOCAL_DATA = "/content/RHEN/data/corpus_synth_1b"  # fast local copy used for training
 
 # The clone deletes /content/RHEN, so run it from /content.
@@ -65,7 +67,8 @@ else:
 sh(f"python tools/make_synthetic_corpus.py --out {LOCAL_DATA}")  # checks the local copy; skips if complete
 
 # Training. Checkpoints go to storage, so re-running this cell after a disconnect resumes.
-sh(f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} --set run_dir={DRIVE_RUN}")
+sh(f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
+   f"--set run_dir={DRIVE_RUN} --set max_steps={TOTAL_STEPS} --set save_every=1000 --set eval_every=1000")
 ```
 
 Settings in `configs/colab_lm_synth_1b.json`: `small` preset, `seq_len` 1024, effective batch
