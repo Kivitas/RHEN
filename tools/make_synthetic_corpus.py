@@ -51,6 +51,28 @@ def build(out_dir: str, docs: int, doc_tokens: int, seed: int, zipf_exponent: fl
     )
 
 
+GENERATOR_FILE = "generator.json"
+
+
+def _complete_with_same_parameters(out_dir: str, params: dict) -> bool:
+    """True when ``out_dir`` holds a finished corpus built with exactly ``params``.
+
+    Checks the sidecar written by a previous run and that the byte sizes match the token counts
+    recorded in ``meta.json``. A run that was interrupted part-way fails the size check.
+    """
+    try:
+        with open(os.path.join(out_dir, GENERATOR_FILE), encoding="utf-8") as fh:
+            if json.load(fh) != params:
+                return False
+        with open(os.path.join(out_dir, "meta.json"), encoding="utf-8") as fh:
+            meta = json.load(fh)
+        train = os.path.getsize(os.path.join(out_dir, "train.bin"))
+        val = os.path.getsize(os.path.join(out_dir, "val.bin"))
+    except (OSError, ValueError):
+        return False
+    return train == 2 * meta["train_tokens"] and val == 2 * meta["val_tokens"]
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", default="data/corpus_synth_1b")
@@ -58,11 +80,28 @@ def main(argv=None) -> None:
     parser.add_argument("--doc-tokens", type=int, default=1_000)
     parser.add_argument("--seed", type=int, default=20261110)
     parser.add_argument("--zipf-exponent", type=float, default=1.07)
+    parser.add_argument("--force", action="store_true", help="rebuild even if a finished corpus exists")
     args = parser.parse_args(argv)
+
+    params = {"docs": args.docs, "doc_tokens": args.doc_tokens, "seed": args.seed,
+              "zipf_exponent": args.zipf_exponent}
+    if not args.force and _complete_with_same_parameters(args.out, params):
+        with open(os.path.join(args.out, "meta.json"), encoding="utf-8") as fh:
+            meta = json.load(fh)
+        print(json.dumps({"out": os.path.abspath(args.out), "status": "already complete, skipped",
+                          "total_tokens": meta["train_tokens"] + meta["val_tokens"]}, indent=2))
+        return
+
+    # Remove the sidecar first, so an interrupted build can never look complete.
+    sidecar = os.path.join(args.out, GENERATOR_FILE)
+    if os.path.exists(sidecar):
+        os.remove(sidecar)
     meta = build(args.out, args.docs, args.doc_tokens, args.seed, args.zipf_exponent)
+    with open(sidecar, "w", encoding="utf-8") as fh:
+        json.dump(params, fh, indent=2)
     total = meta["train_tokens"] + meta["val_tokens"]
-    print(json.dumps({"out": os.path.abspath(args.out), "total_tokens": total,
-                      "content_sha256": meta.get("content_sha256")}, indent=2))
+    print(json.dumps({"out": os.path.abspath(args.out), "status": "built",
+                      "total_tokens": total, "content_sha256": meta.get("content_sha256")}, indent=2))
 
 
 if __name__ == "__main__":
