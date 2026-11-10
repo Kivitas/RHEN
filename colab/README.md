@@ -48,7 +48,7 @@ def sh(cmd, cwd="/content/RHEN"):
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {cmd}")
 
 DRIVE_DATA = f"{BASE}/data/corpus_decision_1b"      # saved tokens (survive disconnects when Drive is mounted)
-DRIVE_RUN = f"{BASE}/runs/colab_decision_1p5ep"     # checkpoints for this run (survive disconnects when Drive is mounted)
+DRIVE_RUN = f"{BASE}/runs/colab_decision_bs128"     # checkpoints for this run (survive disconnects when Drive is mounted)
 # Stage the corpus in /dev/shm, which is RAM-backed, so training reads from memory.
 # Fall back to the normal disk if /dev/shm has less than 6 GB free.
 SHM_FREE = shutil.disk_usage("/dev/shm").free if os.path.exists("/dev/shm") else 0
@@ -75,18 +75,18 @@ else:
 
 sh(f"python tools/make_decision_corpus.py --out {LOCAL_DATA}")  # checks the local copy; skips if complete
 
-# 1.5 epochs of the training split, counted in tokens: 32 sequences * 1024 tokens per step.
+# 1.5 epochs of the training split, counted in tokens: 128 sequences * 1024 tokens per step.
 with open(f"{LOCAL_DATA}/meta.json", encoding="utf-8") as fh:
     TRAIN_TOKENS = json.load(fh)["train_tokens"]
-TOTAL_STEPS = round(1.5 * TRAIN_TOKENS / (32 * 1024))
+TOTAL_STEPS = round(1.5 * TRAIN_TOKENS / (128 * 1024))
 print(f"train tokens: {TRAIN_TOKENS:,}  ->  1.5 epochs = {TOTAL_STEPS:,} steps")
 
-# Try micro-batch sizes 32, 16, 8 and 4, with and without torch.compile. Each combination that fits
+# Try micro-batch sizes 64, 32, 16, 8 and 4, with and without torch.compile. Each combination that fits
 # runs 6 real steps in a throwaway folder, and the fastest measured tokens/sec wins.
-# The effective batch stays at 32 sequences per step.
+# The effective batch is 128 sequences per step (micro_batch * accum = 128).
 import re
 def measure(micro, compile_on):
-    accum = 32 // micro
+    accum = 128 // micro
     cmd = (f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
            f"--set run_dir=/content/smoke_{micro}_{int(compile_on)} --set resume=never "
            f"--set micro_batch_size={micro} --set grad_accum_steps={accum} --set compile={str(compile_on).lower()} "
@@ -104,11 +104,11 @@ def measure(micro, compile_on):
             print((proc.stderr or proc.stdout)[-1500:])  # show failures that are not memory errors
     return speed
 
-results = {(m, c): measure(m, c) for m in (32, 16, 8, 4) for c in (False, True)}
+results = {(m, c): measure(m, c) for m in (64, 32, 16, 8, 4) for c in (False, True)}
 fitting = {k: v for k, v in results.items() if v}
 assert fitting, "No setting fit; see the output above"
 MICRO, COMPILE = max(fitting, key=fitting.get)
-ACCUM = 32 // MICRO
+ACCUM = 128 // MICRO
 print(f"Using micro_batch {MICRO} x accum {ACCUM}, compile={COMPILE} ({fitting[(MICRO, COMPILE)]:,.0f} tokens/sec).")
 
 # Log GPU utilization once a minute to /content/gpu_util.log (check it with: !tail /content/gpu_util.log)
@@ -118,7 +118,8 @@ subprocess.Popen("nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,m
 # Training. Checkpoints go to storage, so re-running this cell after a disconnect resumes.
 sh(f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
    f"--set run_dir={DRIVE_RUN} --set max_steps={TOTAL_STEPS} --set save_every=1000 --set eval_every=1000 "
-   f"--set micro_batch_size={MICRO} --set grad_accum_steps={ACCUM} --set compile={str(COMPILE).lower()}")
+   f"--set micro_batch_size={MICRO} --set grad_accum_steps={ACCUM} --set compile={str(COMPILE).lower()} "
+   f"--set lr=0.0012 --set muon_lr=0.04")
 ```
 
 Settings in `configs/colab_lm_synth_1b.json`: `small` preset, `seq_len` 1024, effective batch
