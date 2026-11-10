@@ -1,0 +1,23 @@
+{
+  "run_dir": "runs/colab_lm_synth_1b",
+  "preset": "small",
+  "device": "auto",
+  "precision": "auto",
+  "lm_data": "data/corpus_synth_1b",
+  "seq_len": 1024,
+  "micro_batch_size": 16,
+  "grad_accum_steps": 2,
+  "optimizer": "muon",
+  "lr": 0.0006,
+  "muon_lr": 0.02,
+  "schedule": "wsd",
+  "warmup_steps": 200,
+  "max_steps": 2000,
+  "decay_fraction": 0.2,
+  "log_every": 20,
+  "eval_every": 500,
+  "eval_lm_batches": 20,
+  "save_every": 500,
+  "keep_last": 3,
+  "tensorboard": false
+}
