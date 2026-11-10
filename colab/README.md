@@ -81,9 +81,30 @@ with open(f"{LOCAL_DATA}/meta.json", encoding="utf-8") as fh:
 TOTAL_STEPS = round(1.5 * TRAIN_TOKENS / (32 * 1024))
 print(f"train tokens: {TRAIN_TOKENS:,}  ->  1.5 epochs = {TOTAL_STEPS:,} steps")
 
+# Pick the largest micro-batch that fits in GPU memory. Each candidate runs 3 real steps in a
+# throwaway folder. The effective batch stays at 32 sequences per step (micro_batch * accum = 32).
+def fits(micro):
+    accum = 32 // micro
+    cmd = (f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
+           f"--set run_dir=/content/smoke_{micro} --set resume=never --set micro_batch_size={micro} "
+           f"--set grad_accum_steps={accum} --set max_steps=3 --set eval_every=1000 --set save_every=1000 "
+           f"--set tensorboard=false")
+    proc = subprocess.run(cmd, shell=True, cwd="/content/RHEN", capture_output=True, text=True)
+    ok = proc.returncode == 0
+    print(f"micro_batch {micro:>2} x accum {accum}: {'fits' if ok else 'does not fit'}")
+    if not ok and "out of memory" not in (proc.stderr + proc.stdout).lower():
+        print((proc.stderr or proc.stdout)[-1500:])  # show failures that are not memory errors
+    return ok
+
+MICRO = next((m for m in (16, 8, 4) if fits(m)), None)
+assert MICRO, "Even micro_batch 4 failed; see the output above"
+ACCUM = 32 // MICRO
+print(f"Using micro_batch {MICRO} x accum {ACCUM} for the full run.")
+
 # Training. Checkpoints go to storage, so re-running this cell after a disconnect resumes.
 sh(f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
-   f"--set run_dir={DRIVE_RUN} --set max_steps={TOTAL_STEPS} --set save_every=1000 --set eval_every=1000")
+   f"--set run_dir={DRIVE_RUN} --set max_steps={TOTAL_STEPS} --set save_every=1000 --set eval_every=1000 "
+   f"--set micro_batch_size={MICRO} --set grad_accum_steps={ACCUM}")
 ```
 
 Settings in `configs/colab_lm_synth_1b.json`: `small` preset, `seq_len` 1024, effective batch
