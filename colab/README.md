@@ -17,6 +17,10 @@ import json, os, subprocess, time, torch
 assert torch.cuda.is_available(), "No GPU: Runtime -> Change runtime type -> A100 or L4"
 print("GPU:", torch.cuda.get_device_name(0))
 
+import psutil, shutil
+print(f"System RAM: {psutil.virtual_memory().total / 1e9:.1f} GB total, "
+      f"{psutil.virtual_memory().available / 1e9:.1f} GB available")
+
 from google.colab import drive
 mounted = False
 for attempt in range(2):
@@ -45,7 +49,14 @@ def sh(cmd, cwd="/content/RHEN"):
 
 DRIVE_DATA = f"{BASE}/data/corpus_decision_1b"      # saved tokens (survive disconnects when Drive is mounted)
 DRIVE_RUN = f"{BASE}/runs/colab_decision_1p5ep"     # checkpoints for this run (survive disconnects when Drive is mounted)
-LOCAL_DATA = "/content/RHEN/data/corpus_decision_1b"  # fast local copy used for training
+# Stage the corpus in /dev/shm, which is RAM-backed, so training reads from memory.
+# Fall back to the normal disk if /dev/shm has less than 6 GB free.
+SHM_FREE = shutil.disk_usage("/dev/shm").free if os.path.exists("/dev/shm") else 0
+if SHM_FREE > 6 * 1024**3:
+    LOCAL_DATA = "/dev/shm/corpus_decision_1b"
+else:
+    LOCAL_DATA = "/content/RHEN/data/corpus_decision_1b"
+print(f"Corpus staging dir: {LOCAL_DATA}  (/dev/shm free: {SHM_FREE / 1e9:.1f} GB)")
 
 # The clone deletes /content/RHEN, so run it from /content.
 sh("rm -rf /content/RHEN && git clone -q -b colab-lm-synth-1b https://github.com/Kivitas/RHEN.git /content/RHEN", cwd="/content")
