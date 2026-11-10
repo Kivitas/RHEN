@@ -34,13 +34,14 @@ else:
     BASE = "/content/rhen_local"
     print("WARNING: Google Drive did not mount. The corpus and checkpoints will be lost if the runtime disconnects.")
 
+os.chdir("/content")  # never run from inside /content/RHEN, because the cell deletes it
+
 def sh(cmd):
-    """Run a shell command, stream its output, and show the last lines if it fails."""
-    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    tail = []
+    """Run a shell command from /content, stream its output, and raise if it fails."""
+    proc = subprocess.Popen(cmd, shell=True, cwd="/content", stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
     for line in proc.stdout:
         print(line, end="")
-        tail = (tail + [line])[-40:]
     if proc.wait() != 0:
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {cmd}")
 
