@@ -48,7 +48,9 @@ def sh(cmd, cwd="/content/RHEN"):
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {cmd}")
 
 DRIVE_DATA = f"{BASE}/data/corpus_decision_1b"      # saved tokens (survive disconnects when Drive is mounted)
-DRIVE_RUN = f"{BASE}/runs/colab_decision_1p5ep"     # checkpoints for this run (survive disconnects when Drive is mounted)
+PRESET = "base"                                     # model size: "small" (45M params) or "base" (246M params)
+MAX_HOURS = 60                                      # the cell stops before training if the estimate is longer than this
+DRIVE_RUN = f"{BASE}/runs/colab_decision_{PRESET}_1p5ep"  # separate folder: a different model cannot resume the small one
 # Stage the corpus in /dev/shm, which is RAM-backed, so training reads from memory.
 # Fall back to the normal disk if /dev/shm has less than 6 GB free.
 SHM_FREE = shutil.disk_usage("/dev/shm").free if os.path.exists("/dev/shm") else 0
@@ -88,7 +90,7 @@ import re
 def measure(micro, compile_on):
     accum = 32 // micro
     cmd = (f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
-           f"--set run_dir=/content/smoke_{micro}_{int(compile_on)} --set resume=never "
+           f"--set preset={PRESET} --set run_dir=/content/smoke_{micro}_{int(compile_on)} --set resume=never "
            f"--set micro_batch_size={micro} --set grad_accum_steps={accum} --set compile={str(compile_on).lower()} "
            f"--set max_steps=6 --set log_every=1 --set eval_every=1000 --set save_every=1000 --set tensorboard=false")
     proc = subprocess.run(cmd, shell=True, cwd="/content/RHEN", capture_output=True, text=True)
@@ -109,7 +111,11 @@ fitting = {k: v for k, v in results.items() if v}
 assert fitting, "No setting fit; see the output above"
 MICRO, COMPILE = max(fitting, key=fitting.get)
 ACCUM = 32 // MICRO
-print(f"Using micro_batch {MICRO} x accum {ACCUM}, compile={COMPILE} ({fitting[(MICRO, COMPILE)]:,.0f} tokens/sec).")
+TPS = fitting[(MICRO, COMPILE)]
+HOURS = TOTAL_STEPS * 32 * 1024 / TPS / 3600
+print(f"Using micro_batch {MICRO} x accum {ACCUM}, compile={COMPILE}, preset={PRESET}: {TPS:,.0f} tokens/sec.")
+print(f"Estimated training time: {HOURS:.1f} hours for {TOTAL_STEPS:,} steps (limit {MAX_HOURS} hours).")
+assert HOURS <= MAX_HOURS, f"Estimate {HOURS:.1f} h is over MAX_HOURS={MAX_HOURS}. Lower MAX_HOURS or pick the small preset."
 
 # Log GPU utilization once a minute to /content/gpu_util.log (check it with: !tail /content/gpu_util.log)
 subprocess.Popen("nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,memory.total --format=csv -l 60 > /content/gpu_util.log",
@@ -117,7 +123,7 @@ subprocess.Popen("nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,m
 
 # Training. Checkpoints go to storage, so re-running this cell after a disconnect resumes.
 sh(f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
-   f"--set run_dir={DRIVE_RUN} --set max_steps={TOTAL_STEPS} --set save_every=1000 --set eval_every=1000 "
+   f"--set preset={PRESET} --set run_dir={DRIVE_RUN} --set max_steps={TOTAL_STEPS} --set save_every=1000 --set eval_every=1000 "
    f"--set micro_batch_size={MICRO} --set grad_accum_steps={ACCUM} --set compile={str(COMPILE).lower()}")
 ```
 
