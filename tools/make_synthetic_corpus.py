@@ -15,11 +15,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 
 import numpy as np
 
-from rhen.research.data import prepare_token_corpus
-from rhen.tokenizer import DEFAULT_TOKENIZER_DIR, get_tokenizer
+# Make `rhen` importable when this file is run directly from a checkout, without installing.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from rhen.research.data import prepare_token_corpus  # noqa: E402
+from rhen.tokenizer import DEFAULT_TOKENIZER_DIR, get_tokenizer  # noqa: E402
 
 
 def build(out_dir: str, docs: int, doc_tokens: int, seed: int, zipf_exponent: float) -> dict:
