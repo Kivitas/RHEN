@@ -93,7 +93,7 @@ def measure(micro, compile_on):
            f"--set max_steps=6 --set log_every=1 --set eval_every=1000 --set save_every=1000 --set tensorboard=false")
     proc = subprocess.run(cmd, shell=True, cwd="/content/RHEN", capture_output=True, text=True)
     ok = proc.returncode == 0
-    speeds = re.findall(r"tokens_per_second=([0-9.]+)", proc.stdout)
+    speeds = re.findall(r"tokens_per_second=([0-9.]+(?:e[+-]?[0-9]+)?)", proc.stdout)  # handles e.g. 3.12e+04
     speed = float(speeds[-1]) if ok and speeds else None
     label = f"micro_batch {micro:>2} x accum {accum}, compile={'on ' if compile_on else 'off'}"
     if speed:
