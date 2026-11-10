@@ -3,7 +3,7 @@
   "preset": "small",
   "device": "auto",
   "precision": "auto",
-  "lm_data": "data/corpus_synth_1b",
+  "lm_data": "data/corpus_decision_1b",
   "seq_len": 1024,
   "micro_batch_size": 4,
   "grad_accum_steps": 8,

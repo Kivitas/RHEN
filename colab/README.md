@@ -13,7 +13,7 @@ to `"fp16"` in `configs/colab_lm_synth_1b.json`.
 ## Paste this into one Colab cell
 
 ```python
-import os, subprocess, time, torch
+import json, os, subprocess, time, torch
 assert torch.cuda.is_available(), "No GPU: Runtime -> Change runtime type -> A100 or L4"
 print("GPU:", torch.cuda.get_device_name(0))
 
@@ -43,11 +43,9 @@ def sh(cmd, cwd="/content/RHEN"):
     if proc.wait() != 0:
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {cmd}")
 
-DRIVE_DATA = f"{BASE}/data/corpus_synth_1b"    # saved tokens (survive disconnects when Drive is mounted)
-DRIVE_RUN = f"{BASE}/runs/colab_lm_synth_1p5ep"  # checkpoints for this run (survive disconnects when Drive is mounted)
-# 1.5 epochs = 1.5 * 991,036,046 train tokens / (32 sequences * 1024 tokens per step)
-TOTAL_STEPS = 45366
-LOCAL_DATA = "/content/RHEN/data/corpus_synth_1b"  # fast local copy used for training
+DRIVE_DATA = f"{BASE}/data/corpus_decision_1b"      # saved tokens (survive disconnects when Drive is mounted)
+DRIVE_RUN = f"{BASE}/runs/colab_decision_1p5ep"     # checkpoints for this run (survive disconnects when Drive is mounted)
+LOCAL_DATA = "/content/RHEN/data/corpus_decision_1b"  # fast local copy used for training
 
 # The clone deletes /content/RHEN, so run it from /content.
 sh("rm -rf /content/RHEN && git clone -q -b colab-lm-synth-1b https://github.com/Kivitas/RHEN.git /content/RHEN", cwd="/content")
@@ -57,14 +55,20 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 sh('pip install -q "transformers>=4.40,<6" "numpy>=1.24"')
 
 if os.path.exists(f"{DRIVE_DATA}/generator.json"):
-    print("Found the corpus in storage; copying it to local disk.")
+    print("Found the decision corpus in storage; copying it to local disk.")
     sh(f"mkdir -p {LOCAL_DATA} && cp {DRIVE_DATA}/train.bin {DRIVE_DATA}/val.bin {DRIVE_DATA}/meta.json {LOCAL_DATA}/ && cp {DRIVE_DATA}/generator.json {LOCAL_DATA}/")
 else:
-    print("No corpus in storage; building it (about 3-5 minutes).")
-    sh(f"python tools/make_synthetic_corpus.py --out {LOCAL_DATA}")
+    print("No decision corpus in storage; building it (about 15-30 minutes).")
+    sh(f"python tools/make_decision_corpus.py --out {LOCAL_DATA}")
     sh(f"mkdir -p {DRIVE_DATA} && cp {LOCAL_DATA}/train.bin {LOCAL_DATA}/val.bin {LOCAL_DATA}/meta.json {DRIVE_DATA}/ && cp {LOCAL_DATA}/generator.json {DRIVE_DATA}/")
 
-sh(f"python tools/make_synthetic_corpus.py --out {LOCAL_DATA}")  # checks the local copy; skips if complete
+sh(f"python tools/make_decision_corpus.py --out {LOCAL_DATA}")  # checks the local copy; skips if complete
+
+# 1.5 epochs of the training split, counted in tokens: 32 sequences * 1024 tokens per step.
+with open(f"{LOCAL_DATA}/meta.json", encoding="utf-8") as fh:
+    TRAIN_TOKENS = json.load(fh)["train_tokens"]
+TOTAL_STEPS = round(1.5 * TRAIN_TOKENS / (32 * 1024))
+print(f"train tokens: {TRAIN_TOKENS:,}  ->  1.5 epochs = {TOTAL_STEPS:,} steps")
 
 # Training. Checkpoints go to storage, so re-running this cell after a disconnect resumes.
 sh(f"python -m cli.train --config configs/colab_lm_synth_1b.json --set lm_data={LOCAL_DATA} "
