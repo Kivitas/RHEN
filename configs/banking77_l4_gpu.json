@@ -1,0 +1,23 @@
+{
+  "run_dir": "runs/banking77_l4",
+  "seed": 0,
+  "device": "cuda",
+  "precision": "bf16",
+  "preset": "small",
+  "decision_train": "data/banking77/train.jsonl",
+  "decision_val": "data/banking77/val.jsonl",
+  "decision_batch_size": 16,
+  "grad_accum_steps": 2,
+  "order_consistency_coef": 0.1,
+  "optimizer": "muon",
+  "lr": 0.0003,
+  "muon_lr": 0.02,
+  "schedule": "wsd",
+  "warmup_steps": 200,
+  "max_steps": 3000,
+  "log_every": 25,
+  "eval_every": 250,
+  "eval_decision_examples": 500,
+  "save_every": 500,
+  "keep_last": 3
+}

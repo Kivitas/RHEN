@@ -15,6 +15,7 @@ High-level interface for non-autoregressive parallel decisions over structured s
 from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -1123,12 +1124,27 @@ class RhenEngine:
     EOS forward pass using 2D block-causal branch masking.
     """
 
-    def __init__(self, config=None, model=None, tokenizer=None, device: Optional[torch.device] = None):
+    def __init__(
+        self,
+        config=None,
+        model=None,
+        tokenizer=None,
+        device: Optional[torch.device] = None,
+        effort: Optional[str] = None,
+    ):
         if isinstance(config, torch.nn.Module):
             if model is not None and tokenizer is None:
                 tokenizer = model
             model = config
             config = getattr(model, 'config', None)
+
+        effort_norm: Optional[str] = None
+        if effort is not None:
+            effort_norm = str(effort).strip().lower()
+            if effort_norm not in ("low", "medium", "high"):
+                raise ValueError(
+                    f"Unknown effort level {effort!r}; expected one of ('low', 'medium', 'high')"
+                )
 
         if model is None:
             if config is None:
@@ -1136,7 +1152,10 @@ class RhenEngine:
                     from rhen.config import EOSConfig
                 except ImportError:
                     from config import EOSConfig
-                config = EOSConfig()
+                if effort_norm is not None:
+                    config = EOSConfig.from_effort(effort_norm)
+                else:
+                    config = EOSConfig()
             try:
                 from rhen.model import EOSModel
             except ImportError:
@@ -1158,12 +1177,58 @@ class RhenEngine:
         self.model.to(self.device)
         self.model.eval()
 
+        model_cfg = getattr(self.model, "config", None)
+        self.effort = effort_norm or getattr(model_cfg, "effort", "high")
+        isolate_opts = bool(getattr(model_cfg, "isolate_branch_options", False))
+
         self.conformal_engine = ConformalPredictionEngine(alpha=0.05)
         self.ood_detector = EnergyOODDetector(ood_threshold=4.5)
-        self.packer = get_rhen_packer(self.tokenizer)
+        self.packer = get_rhen_packer(self.tokenizer, isolate_branch_options=isolate_opts)
 
         # Unified geometry-based selective abstention gate.
         self.abstention_gate = GeometricAbstentionGate()
+
+    @classmethod
+    def from_effort(cls, effort: str = "low", **kwargs: Any) -> "RhenEngine":
+        """Convenience constructor building a RhenEngine for a named effort level.
+
+        Extra keyword arguments are forwarded as ``EOSConfig.from_effort`` overrides,
+        except ``tokenizer``, ``device``, ``model``, and ``config`` which configure
+        the engine directly.
+        """
+        tokenizer = kwargs.pop("tokenizer", None)
+        device = kwargs.pop("device", None)
+        model = kwargs.pop("model", None)
+        config = kwargs.pop("config", None)
+        if config is None and model is None:
+            try:
+                from rhen.config import EOSConfig
+            except ImportError:
+                from config import EOSConfig
+            config = EOSConfig.from_effort(effort, **kwargs)
+        return cls(config=config, model=model, tokenizer=tokenizer, device=device, effort=effort)
+
+    def _resolve_effort_loops(
+        self,
+        effort: Optional[str] = None,
+        num_loops: Optional[int] = None,
+    ) -> Optional[int]:
+        """Resolve per-call recurrent loop budget from ``effort`` and/or ``num_loops``."""
+        if num_loops is not None:
+            return int(num_loops)
+        if effort is None:
+            return None
+        eff = str(effort).strip().lower()
+        cfg = getattr(self.model, "config", None)
+        if eff == "low":
+            return 1
+        if eff == "medium":
+            return max(1, min(4, getattr(cfg, "max_recurrent_loops", 4) // 2))
+        if eff == "high":
+            return getattr(cfg, "max_recurrent_loops", 12)
+        raise ValueError(
+            f"Unknown effort level {effort!r}; expected one of ('low', 'medium', 'high')"
+        )
 
     # ---------------------------------------------------------------------------------
     # Unified Geometry-Based Selective Abstention
@@ -1989,13 +2054,30 @@ class RhenEngine:
             "packed_sequence": packed,
         }
 
-    def noul(self, state: Any, proposition: str) -> NoulResult:
+    def noul(
+        self,
+        state: Any,
+        proposition: str,
+        effort: Optional[str] = None,
+        num_loops: Optional[int] = None,
+    ) -> NoulResult:
         """Evaluates a binary semantic proposition."""
-        return self.evaluate(state, [Noul(proposition=proposition)])[0]
+        return self.evaluate(
+            state, [Noul(proposition=proposition)], effort=effort, num_loops=num_loops
+        )[0]
 
-    def choice(self, state: Any, question: str, options: List[str]) -> ChoiceResult:
+    def choice(
+        self,
+        state: Any,
+        question: str,
+        options: List[str],
+        effort: Optional[str] = None,
+        num_loops: Optional[int] = None,
+    ) -> ChoiceResult:
         """Evaluates a categorical choice."""
-        return self.evaluate(state, [Choice(question=question, options=options)])[0]
+        return self.evaluate(
+            state, [Choice(question=question, options=options)], effort=effort, num_loops=num_loops
+        )[0]
 
     def score(
         self,
@@ -2004,6 +2086,8 @@ class RhenEngine:
         levels: Optional[List[str]] = None,
         min_score: float = 0.0,
         max_score: float = 10.0,
+        effort: Optional[str] = None,
+        num_loops: Optional[int] = None,
     ) -> ScoreResult:
         """Evaluates an expected continuous score."""
         return self.evaluate(
@@ -2014,6 +2098,8 @@ class RhenEngine:
                 min_score=min_score,
                 max_score=max_score,
             )],
+            effort=effort,
+            num_loops=num_loops,
         )[0]
 
     def multichoice(
@@ -2022,9 +2108,16 @@ class RhenEngine:
         question: str,
         options: List[str],
         threshold: float = 0.5,
+        effort: Optional[str] = None,
+        num_loops: Optional[int] = None,
     ) -> MultiChoiceResult:
         """Evaluates a multi-choice selection where multiple options can exceed threshold."""
-        return self.evaluate(state, [MultiChoice(question=question, options=options, threshold=threshold)])[0]
+        return self.evaluate(
+            state,
+            [MultiChoice(question=question, options=options, threshold=threshold)],
+            effort=effort,
+            num_loops=num_loops,
+        )[0]
 
     def range(
         self,
@@ -2032,18 +2125,45 @@ class RhenEngine:
         question: str,
         min_val: float = 0.0,
         max_val: float = 100.0,
+        effort: Optional[str] = None,
+        num_loops: Optional[int] = None,
     ) -> RangeResult:
         """Evaluates a continuous expected value and interval range."""
-        return self.evaluate(state, [Range(question=question, min_val=min_val, max_val=max_val)])[0]
+        return self.evaluate(
+            state,
+            [Range(question=question, min_val=min_val, max_val=max_val)],
+            effort=effort,
+            num_loops=num_loops,
+        )[0]
 
     def extract(
         self,
         state: Any,
         slot_name: str,
         query: str = "",
+        effort: Optional[str] = None,
+        num_loops: Optional[int] = None,
     ) -> ExtractResult:
         """Extracts a structured value for a given slot from state."""
-        return self.evaluate(state, [Extract(slot_name=slot_name, query=query)])[0]
+        return self.evaluate(
+            state,
+            [Extract(slot_name=slot_name, query=query)],
+            effort=effort,
+            num_loops=num_loops,
+        )[0]
+
+    def decide_parallel(
+        self,
+        state: Any,
+        questions: List[Union[Noul, Choice, Score, MultiChoice, Range, Extract, Cascade, Tuple[str, List[str]]]],
+        effort: Optional[str] = None,
+        num_loops: Optional[int] = None,
+        **kwargs: Any,
+    ) -> List[Union[NoulResult, ChoiceResult, ScoreResult, MultiChoiceResult, RangeResult, ExtractResult, CascadeResult, Dict[str, Any]]]:
+        """Evaluates multiple typed decision questions concurrently over shared state."""
+        return self.evaluate(
+            state, questions, effort=effort, num_loops=num_loops, **kwargs
+        )
 
     def evaluate(
         self,
@@ -2052,6 +2172,8 @@ class RhenEngine:
         delta_state: Optional[Any] = None,
         is_delta: bool = False,
         latent_tensors: Optional[Dict[str, Any]] = None,
+        effort: Optional[str] = None,
+        num_loops: Optional[int] = None,
         **kwargs: Any,
     ) -> List[Union[NoulResult, ChoiceResult, ScoreResult, MultiChoiceResult, RangeResult, ExtractResult, CascadeResult, Dict[str, Any]]]:
         """
@@ -2123,7 +2245,12 @@ class RhenEngine:
                 device=self.device,
                 latent_tensors=latent_tensors,
             )
-        elif packer is not None and (latent_tensors is not None or not isinstance(state, str)):
+        elif packer is not None and (
+            latent_tensors is not None
+            or not isinstance(state, str)
+            or getattr(packer, "isolate_branch_options", False)
+            or hasattr(self.model, "forward_rhen")
+        ):
             packed_input = packer.pack(
                 state=state,
                 questions_and_options=tuples,
@@ -2134,11 +2261,24 @@ class RhenEngine:
             packed_input = state
 
         # Errors from the model or packer propagate: there is no retry with altered questions.
-        raw_results = self.model.evaluate_rhen(
-            packed_or_state=packed_input,
-            questions_and_options=tuples,
-            tokenizer=self.tokenizer,
-        )
+        eval_kwargs: Dict[str, Any] = {
+            "packed_or_state": packed_input,
+            "questions_and_options": tuples,
+            "tokenizer": self.tokenizer,
+        }
+        resolved_loops = self._resolve_effort_loops(effort=effort, num_loops=num_loops)
+        if resolved_loops is not None:
+            try:
+                sig = inspect.signature(self.model.evaluate_rhen)
+                params = sig.parameters
+                if "num_loops" in params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                ):
+                    eval_kwargs["num_loops"] = resolved_loops
+            except (TypeError, ValueError):
+                eval_kwargs["num_loops"] = resolved_loops
+
+        raw_results = self.model.evaluate_rhen(**eval_kwargs)
 
         typed_results = []
         for (q_type, q_obj), raw_res in zip(types, raw_results):
@@ -2487,7 +2627,7 @@ class RhenEngine:
 class AdvancedRhenEngine(RhenEngine):
     """RhenEngine with OOD-calibrated latent search and speculative / schema operations."""
 
-    def __init__(self, config=None, model=None, tokenizer=None, device=None):
+    def __init__(self, config=None, model=None, tokenizer=None, device=None, effort: Optional[str] = None):
         if isinstance(config, torch.nn.Module):
             if model is not None and tokenizer is None:
                 tokenizer = model
@@ -2507,9 +2647,9 @@ class AdvancedRhenEngine(RhenEngine):
             except ImportError:
                 from config import EOSConfig
                 from model import EOSModel
-            config = EOSConfig()
+            config = EOSConfig.from_effort(effort) if effort is not None else EOSConfig()
             model = EOSModel(config)
-        super().__init__(config=config, model=model, tokenizer=tokenizer, device=device)
+        super().__init__(config=config, model=model, tokenizer=tokenizer, device=device, effort=effort)
         self.config = config
 
     def simulate_latent_outcomes(
@@ -2735,6 +2875,8 @@ def decide(
     questions: Union[Any, List[Any]],
     on_abstain: str = "return",
     engine: Optional[RhenEngine] = None,
+    effort: Optional[str] = None,
+    num_loops: Optional[int] = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -2798,7 +2940,7 @@ def decide(
         normalized_state = state
 
     eng = engine if engine is not None else get_default_engine()
-    results = eng.evaluate(normalized_state, q_list, **kwargs)
+    results = eng.evaluate(normalized_state, q_list, effort=effort, num_loops=num_loops, **kwargs)
 
     processed = []
     for res in results:

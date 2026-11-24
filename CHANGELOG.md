@@ -10,18 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Effort tiers & gated intra-branch option isolation**:
+  - Added configurable compute effort tiers (`low`, `medium`, `high`) to scale recurrent deliberation depth at inference time.
+  - Added gated intra-branch option isolation (`isolate_branch_options`) so candidate options within a decision branch can be masked from cross-attending to one another to strengthen option-order invariance.
+- **Banking77 decision corpus generator & L4 GPU training config**:
+  - Added `bank77corpus.py` (backed by `benchmarks/banking77/bank77corpus.py`) to build stratified `train.jsonl`, `val.jsonl`, `test.jsonl`, `test_ood.jsonl`, and `corpus_manifest.json` (with SHA-256 digests and exact training/evaluation commands) in `full77`, `hard_negatives`, and `mixed` modes, plus an offline `--synthetic` smoke mode.
+  - Added `configs/banking77_l4_gpu.json`, a `TrainConfig` tuned for single-GPU NVIDIA L4 (24 GB VRAM, `bf16`, `small` preset, Muon + WSD schedule, option-order consistency).
 - **Predictive layer** (`rhen/forecasting.py`):
-  - `Forecast`: median path plus nine quantiles (levels 0.1 to 0.9) per step, with `interval()`, `prob_exceeds()` and `uncertainty()` computed from the quantile function.
+  - `Forecast`: median path plus nine quantiles (levels 0.1 to 0.9) per step, with `interval()`, `prob_exceeds()`, `copula_breach_prob()` (stationary AR(1) Gaussian-copula horizon breach probability clamped within Fréchet-Hoeffding bounds), and `uncertainty(scale_floor=...)` computed from the quantile function.
   - `NaiveQuantileForecaster`: dependency-free random-walk baseline and default forecaster.
   - `TimesFMForecaster`: adapter for TimesFM 3.0 (`timesfm3`). It requires `license_acknowledged=True` because the 3.0 weights are non-commercial only.
   - Error metrics: `pinball_loss`, `interval_coverage`, `mase`, `brier_score`.
 - **Forecast-aware decisions** (`rhen/decision_pipeline.py`):
-  - `ForecastAwareDecider`: forecasts series, conditions `RhenEngine.choice` on the forecast summary, applies the policy, and gates execution through `approve` and `execute`.
+  - `ForecastAwareDecider`: forecasts series, conditions `RhenEngine.choice` on the forecast summary, surfaces `breach_prob_copula` alongside lower/upper breach bounds in decision features, applies the policy, and gates execution through `approve` and `execute`.
   - `DecisionPolicy`: deterministic gate returning `EXECUTE`, `NEEDS_APPROVAL`, `ABSTAIN` or `BLOCKED`, with reasons.
   - `FeedbackLedger`: records decisions and outcomes, reports calibration (pinball loss, coverage, Brier), and round-trips through JSONL.
 - `forecast` optional extra: `pip install "rhen[forecast]"` (installs `timesfm[torch]>=3.0.2,<4`).
 - Example `examples/08_forecast_aware_decisions.py` (baseline forecaster by default; TimesFM only with `--timesfm --accept-noncommercial-license`).
-- Tests in `tests/test_forecast_integration.py`. The real TimesFM test runs only with `RHEN_TIMESFM_RUN_REAL=1` and a cached checkpoint.
+- Tests in `tests/test_forecast_integration.py` and `tests/test_bank77corpus_and_forecast.py`. The real TimesFM test runs only with `RHEN_TIMESFM_RUN_REAL=1` and a cached checkpoint.
 - README section "Predictive layer and forecast-aware decisions".
 
 ### Changed
@@ -40,7 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mask downgrade logging.** The 4D-to-2D downgrade logs one WARNING per encoder instance, because branch isolation may not hold for that encoder.
 - **Tokenizer fallback.** `SemanticBoundaryChunker.count_tokens` catches `Exception` again, so tokenizers that raise plain `Exception` subclasses fall back to the character estimate. The fallback logs one WARNING.
 - **Other logged fallbacks.** The state-depth and latent-slot fallbacks in `rhen_packer` log one WARNING per site. `FusedSwiGLU` replaces `print()` with logging, and a failed compiled forward logs at DEBUG.
-- **Checkpoint trust.** `optimizers.pt` loads with `weights_only=True`. `rng_rank*.pt` still loads with `weights_only=False` and logs a WARNING, because NumPy RNG state needs full unpickling. `load_checkpoint` documents that checkpoints must come from a trusted source.
+- **Checkpoint trust (`rhen-rng-v2`).** `optimizers.pt` and new `rhen-rng-v2` RNG state checkpoints serialize NumPy/Python/PyTorch RNG state as plain tensors and primitives so they load cleanly with `weights_only=True`. Legacy `rng_rank*.pt` checkpoints remain readable with a fallback warning; `load_checkpoint` documents that legacy checkpoints must come from a trusted source.
+- **RLCD margin & PPO optimization.** Fixed `RLCDOptimizer` margin reward and PPO clipped surrogate computation so policy ratio updates and calibration penalties align cleanly during reinforcement learning.
+- **Range variance calibration loss.** Fixed `Range` primitive loss to calibrate predictive Beta variance alongside mean accuracy rather than under-regularizing spread.
 - **Router grouping.** `HierarchicalChoiceRouter` groups options by character-trigram similarity (balanced, deterministic k-medoids) instead of by position, and labels each group with its medoid. Its accuracy against a flat scorer is not measured in this repo.
 - **Banking77 measurement.** `benchmarks/banking77/` reports baselines on the full 3,080-example test split: TF-IDF logistic regression 87.9% (2,707 correct), TF-IDF nearest centroid 80.8%, majority class 1.3%. The untrained RHEN variant was run on 3 examples only (0 of 3 correct). It is a pipeline check, not an accuracy estimate.
 - **README claims.** Removed "production-grade" and "Mission-Critical" from the introduction, and removed "empirically calibrated" and "coverage guarantees" wording. Removed the unmeasured router claim "scores <25% of options without accuracy loss". Calibration, conformal coverage, router accuracy and the absence of comparisons with other systems are now listed under "Known limitations".

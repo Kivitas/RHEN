@@ -282,3 +282,118 @@ def sample_decision_batch(
     gen = np.random.default_rng([int(seed), int(rank), int(step), int(micro_step), 7])
     idx = gen.integers(0, len(examples), size=batch_size)
     return [examples[int(i)] for i in idx]
+
+
+def collate_packed_sequences(
+    sequences: Sequence[Any],
+    pad_token_id: int = 0,
+) -> Any:
+    """Collate a batch of ``PackedRhenSequence`` objects into one ``[B, S_max]`` 4D-masked ``PackedRhenSequence``.
+
+    Uses :meth:`Rhen2DBranchMask.create_batch_mask` to build the ``[B, 1, S_max, S_max]``
+    2D block-causal attention mask across variable or uniform sequence lengths, while
+    preserving any stricter intra-branch option isolation or tree masks present on the
+    individual sequences.
+    """
+    if not sequences:
+        raise ValueError("collate_packed_sequences requires at least one PackedRhenSequence")
+
+    try:
+        from rhen.optim.rhen_mask import Rhen2DBranchMask
+        from rhen.rhen_packer import PackedRhenSequence
+    except ImportError:
+        from optim.rhen_mask import Rhen2DBranchMask
+        from rhen_packer import PackedRhenSequence
+
+    batch_size = len(sequences)
+    seq_lens = [int(seq.input_ids.shape[-1]) for seq in sequences]
+    max_len = max(seq_lens)
+    device = sequences[0].input_ids.device
+    id_dtype = sequences[0].input_ids.dtype
+    mask_dtype = sequences[0].attention_mask.dtype
+
+    input_ids = torch.full((batch_size, max_len), int(pad_token_id), dtype=id_dtype, device=device)
+    batch_state_lengths = [int(seq.state_length) for seq in sequences]
+    batch_branch_lengths = [[int(b) for b in seq.branch_lengths] for seq in sequences]
+
+    attention_mask = Rhen2DBranchMask.create_batch_mask(
+        batch_state_lengths=batch_state_lengths,
+        batch_branch_lengths=batch_branch_lengths,
+        max_seq_len=max_len,
+        device=device,
+        dtype=mask_dtype,
+    )
+
+    for b_idx, seq in enumerate(sequences):
+        curr_len = seq_lens[b_idx]
+        input_ids[b_idx, :curr_len] = seq.input_ids.reshape(-1)[:curr_len].to(device=device, dtype=id_dtype)
+        if getattr(seq, "attention_mask", None) is not None and seq.attention_mask.numel() == curr_len * curr_len:
+            seq_mask = seq.attention_mask.reshape(curr_len, curr_len).to(device=device, dtype=mask_dtype)
+            attention_mask[b_idx, 0, :curr_len, :curr_len] = torch.minimum(
+                attention_mask[b_idx, 0, :curr_len, :curr_len], seq_mask
+            )
+
+    depth_tensor: Optional[torch.Tensor] = None
+    if any(getattr(seq, "depth_ids", None) is not None for seq in sequences):
+        depth_tensor = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
+        for b_idx, seq in enumerate(sequences):
+            d = getattr(seq, "depth_ids", None)
+            if d is not None:
+                d_t = (
+                    d.to(device=device, dtype=torch.long).reshape(-1)
+                    if isinstance(d, torch.Tensor)
+                    else torch.tensor(d, dtype=torch.long, device=device).reshape(-1)
+                )
+                n = min(int(d_t.numel()), seq_lens[b_idx])
+                depth_tensor[b_idx, :n] = d_t[:n]
+
+    branch_depth_tensor: Optional[torch.Tensor] = None
+    if any(getattr(seq, "branch_depth_ids", None) is not None for seq in sequences):
+        branch_depth_tensor = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
+        for b_idx, seq in enumerate(sequences):
+            bd = getattr(seq, "branch_depth_ids", None)
+            if bd is not None:
+                bd_t = (
+                    bd.to(device=device, dtype=torch.long).reshape(-1)
+                    if isinstance(bd, torch.Tensor)
+                    else torch.tensor(bd, dtype=torch.long, device=device).reshape(-1)
+                )
+                n = min(int(bd_t.numel()), seq_lens[b_idx])
+                branch_depth_tensor[b_idx, :n] = bd_t[:n]
+
+    extra_kwargs: Dict[str, Any] = {}
+    if "position_ids" in getattr(PackedRhenSequence, "__dataclass_fields__", {}):
+        if any(getattr(seq, "position_ids", None) is not None for seq in sequences):
+            pos_tensor = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
+            for b_idx, seq in enumerate(sequences):
+                p = getattr(seq, "position_ids", None)
+                if p is not None:
+                    p_t = (
+                        p.to(device=device, dtype=torch.long).reshape(-1)
+                        if isinstance(p, torch.Tensor)
+                        else torch.tensor(p, dtype=torch.long, device=device).reshape(-1)
+                    )
+                else:
+                    p_t = torch.arange(seq_lens[b_idx], dtype=torch.long, device=device)
+                n = min(int(p_t.numel()), seq_lens[b_idx])
+                pos_tensor[b_idx, :n] = p_t[:n]
+            extra_kwargs["position_ids"] = pos_tensor
+
+    collated = PackedRhenSequence(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        state_length=int(sequences[0].state_length),
+        branch_lengths=list(sequences[0].branch_lengths),
+        branches=list(sequences[0].branches),
+        depth_ids=depth_tensor,
+        branch_depth_ids=branch_depth_tensor,
+        is_delta=all(bool(getattr(seq, "is_delta", False)) for seq in sequences),
+        latent_tensors=sequences[0].latent_tensors if batch_size == 1 else None,
+        latent_slot_indices=sequences[0].latent_slot_indices if batch_size == 1 else None,
+        is_speculative_tree=all(bool(getattr(seq, "is_speculative_tree", False)) for seq in sequences),
+        **extra_kwargs,
+    )
+    collated.batch_state_lengths = batch_state_lengths
+    collated.batch_branch_lengths = batch_branch_lengths
+    collated.batch_branches = [list(seq.branches) for seq in sequences]
+    return collated

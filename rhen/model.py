@@ -227,9 +227,13 @@ def apply_rotary_pos_emb(
 
 
 def _rope_rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Rotate ``x`` of shape [B, H, S, D] by position tables ``cos``/``sin`` of shape [S, D]."""
-    cos = cos.unsqueeze(0).unsqueeze(0).to(x.dtype)
-    sin = sin.unsqueeze(0).unsqueeze(0).to(x.dtype)
+    """Rotate ``x`` of shape [B, H, S, D] by position tables ``cos``/``sin`` of shape [S, D] or [B, S, D]."""
+    if cos.dim() == 3:
+        cos = cos.unsqueeze(1).to(x.dtype)
+        sin = sin.unsqueeze(1).to(x.dtype)
+    else:
+        cos = cos.unsqueeze(0).unsqueeze(0).to(x.dtype)
+        sin = sin.unsqueeze(0).unsqueeze(0).to(x.dtype)
     return (x * cos) + (rotate_half(x) * sin)
 
 
@@ -318,31 +322,50 @@ class StateSpaceMemoryHighway(nn.Module):
         hidden_states: torch.Tensor,
         step_idx: int,
         prefix_state: Optional[Dict[str, Any]] = None,
+        pooling_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Inject the loop memory into ``hidden_states``.
 
         ``prefix_state`` is used by cached decoding: it holds the running float32 sum and
         count of every earlier position seen at this loop step, so the causal mean of a new
         token equals the one the full-sequence forward would compute. It is updated in place.
+
+        When ``pooling_mask`` is supplied (e.g. under intra-branch option isolation), each
+        position averages only the positions it is permitted to attend to, preventing
+        cross-option leakage through the running mean.
         """
         _, seq_len, _ = hidden_states.shape
-        # Causal pooling: position t summarises tokens 0..t only (running mean), so
-        # the memory never reads future positions.
-        prev_count = 0
-        prev_sum = None
-        if prefix_state is not None:
-            prev_count = int(prefix_state.get("count", 0))
-            prev_sum = prefix_state.get("sum")
-        counts = torch.arange(
-            prev_count + 1, prev_count + seq_len + 1, device=hidden_states.device, dtype=torch.float32
-        ).view(1, seq_len, 1)
-        h_sum = hidden_states.float().cumsum(dim=1)
-        if prev_sum is not None:
-            h_sum = h_sum + prev_sum
-        if prefix_state is not None:
-            prefix_state["sum"] = h_sum[:, -1:, :].detach()
-            prefix_state["count"] = prev_count + seq_len
-        h_cum = (h_sum / counts).to(hidden_states.dtype)  # [B, S, H]
+        if pooling_mask is not None and prefix_state is None:
+            if pooling_mask.ndim == 4:
+                m_slice = pooling_mask[:, 0, :seq_len, :seq_len]
+            elif pooling_mask.ndim == 3:
+                m_slice = pooling_mask[:, :seq_len, :seq_len]
+            else:
+                m_slice = pooling_mask[:seq_len, :seq_len]
+            allowed = (m_slice == 0.0).to(
+                device=hidden_states.device, dtype=torch.float32
+            )
+            row_counts = allowed.sum(dim=-1, keepdim=True).clamp(min=1.0)
+            weights = allowed / row_counts
+            h_cum = torch.matmul(weights, hidden_states.float()).to(hidden_states.dtype)
+        else:
+            # Causal pooling: position t summarises tokens 0..t only (running mean), so
+            # the memory never reads future positions.
+            prev_count = 0
+            prev_sum = None
+            if prefix_state is not None:
+                prev_count = int(prefix_state.get("count", 0))
+                prev_sum = prefix_state.get("sum")
+            counts = torch.arange(
+                prev_count + 1, prev_count + seq_len + 1, device=hidden_states.device, dtype=torch.float32
+            ).view(1, seq_len, 1)
+            h_sum = hidden_states.float().cumsum(dim=1)
+            if prev_sum is not None:
+                h_sum = h_sum + prev_sum
+            if prefix_state is not None:
+                prefix_state["sum"] = h_sum[:, -1:, :].detach()
+                prefix_state["count"] = prev_count + seq_len
+            h_cum = (h_sum / counts).to(hidden_states.dtype)  # [B, S, H]
         x_m = self.in_proj(h_cum)                                                        # [B, S, state_dim]
 
         # One memory vector per position, carried across loop iterations.
@@ -587,6 +610,7 @@ class MultiLatentAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         kv_modulation: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         batch_size, seq_len, _ = hidden_states.shape
 
@@ -639,19 +663,26 @@ class MultiLatentAttention(nn.Module):
 
         # RoPE is applied to the full key (content + rope parts) and to the query with
         # the same cos/sin, so q.k depends only on relative position. cos/sin are [S, D]
-        # tables (a leading singleton batch dim is accepted) and must cover every key
-        # position; the queries are the trailing seq_len of them.
+        # tables (a leading singleton or per-batch [B, S, D] dim is accepted) and must cover
+        # every key position; the queries are the trailing seq_len of them.
         if cos.dim() == 3 and cos.shape[0] == 1:
             cos, sin = cos[0], sin[0]
-        if cos.dim() != 2 or sin.dim() != 2:
-            raise ValueError(f"cos/sin must be [S, D] or [1, S, D], got {tuple(cos.shape)}")
         k = k_unrope + k_rope_exp
         k_len = k.shape[2]
-        if cos.shape[0] < k_len:
-            raise ValueError(f"cos/sin must cover all {k_len} key positions, got {cos.shape[0]}")
-        cos_k, sin_k = cos[:k_len], sin[:k_len]
-        q = _rope_rotate(q, cos_k[k_len - seq_len:], sin_k[k_len - seq_len:])
-        k = _rope_rotate(k, cos_k, sin_k)
+        if cos.dim() == 3 and sin.dim() == 3 and cos.shape[0] == batch_size and batch_size > 1:
+            if cos.shape[1] < k_len:
+                raise ValueError(f"cos/sin must cover all {k_len} key positions, got {cos.shape[1]}")
+            cos_k, sin_k = cos[:, :k_len], sin[:, :k_len]
+            q = _rope_rotate(q, cos_k[:, k_len - seq_len:], sin_k[:, k_len - seq_len:])
+            k = _rope_rotate(k, cos_k, sin_k)
+        elif cos.dim() == 2 and sin.dim() == 2:
+            if cos.shape[0] < k_len:
+                raise ValueError(f"cos/sin must cover all {k_len} key positions, got {cos.shape[0]}")
+            cos_k, sin_k = cos[:k_len], sin[:k_len]
+            q = _rope_rotate(q, cos_k[k_len - seq_len:], sin_k[k_len - seq_len:])
+            k = _rope_rotate(k, cos_k, sin_k)
+        else:
+            raise ValueError(f"cos/sin must be [S, D] or [1, S, D], got {tuple(cos.shape)}")
 
         # Apply bidirectional Rhen KV modulation if active
         if kv_modulation is not None:
@@ -666,14 +697,30 @@ class MultiLatentAttention(nn.Module):
         if getattr(self.config, "interleave_swa", True) and (self.layer_idx % 2 == 1):
             window_size = getattr(self.config, "swa_window_size", 512)
             device = hidden_states.device
-            r_idx = torch.arange(seq_len, device=device).unsqueeze(1)
-            c_idx = torch.arange(k.shape[2], device=device).unsqueeze(0)
-            offset = k.shape[2] - seq_len
-            causal_b = (c_idx <= r_idx + offset)
-            swa_b = causal_b & (c_idx > r_idx + offset - window_size)
+            if position_ids is not None and kv_cache is None and k.shape[2] == seq_len:
+                pos = position_ids.to(device=device)
+                if pos.ndim == 2 and pos.shape[0] > 1:
+                    pos_r = pos.unsqueeze(2)
+                    pos_c = pos.unsqueeze(1)
+                    swa_b = ((pos_c <= pos_r) & (pos_c > pos_r - window_size)) if attention_mask is None else ((pos_r - pos_c) < window_size)
+                    swa_mask = torch.full((pos.shape[0], 1, seq_len, k.shape[2]), float("-inf"), device=device, dtype=q.dtype)
+                    swa_mask = swa_mask.masked_fill(swa_b.unsqueeze(1), 0.0)
+                else:
+                    pos_1d = pos.reshape(-1)
+                    pos_r = pos_1d.unsqueeze(1)
+                    pos_c = pos_1d.unsqueeze(0)
+                    swa_b = ((pos_c <= pos_r) & (pos_c > pos_r - window_size)) if attention_mask is None else ((pos_r - pos_c) < window_size)
+                    swa_mask = torch.full((seq_len, k.shape[2]), float("-inf"), device=device, dtype=q.dtype)
+                    swa_mask = swa_mask.masked_fill(swa_b, 0.0).unsqueeze(0).unsqueeze(0)
+            else:
+                r_idx = torch.arange(seq_len, device=device).unsqueeze(1)
+                c_idx = torch.arange(k.shape[2], device=device).unsqueeze(0)
+                offset = k.shape[2] - seq_len
+                causal_b = (c_idx <= r_idx + offset)
+                swa_b = causal_b & (c_idx > r_idx + offset - window_size)
 
-            swa_mask = torch.full((seq_len, k.shape[2]), float("-inf"), device=device, dtype=q.dtype)
-            swa_mask = swa_mask.masked_fill(swa_b, 0.0).unsqueeze(0).unsqueeze(0)
+                swa_mask = torch.full((seq_len, k.shape[2]), float("-inf"), device=device, dtype=q.dtype)
+                swa_mask = swa_mask.masked_fill(swa_b, 0.0).unsqueeze(0).unsqueeze(0)
 
             if attention_mask is None:
                 attention_mask = swa_mask
@@ -1250,11 +1297,18 @@ class TransformerLayer(nn.Module):
         residual_scale: float = 1.0,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         kv_modulation: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]], torch.Tensor]:
         normed_input = self.input_layernorm(hidden_states)
-        attn_out, new_kv_cache = self.self_attn(
-            normed_input, cos, sin, attention_mask=attention_mask, kv_cache=kv_cache, kv_modulation=kv_modulation
-        )
+        if position_ids is not None and isinstance(self.self_attn, MultiLatentAttention):
+            attn_out, new_kv_cache = self.self_attn(
+                normed_input, cos, sin, attention_mask=attention_mask, kv_cache=kv_cache,
+                kv_modulation=kv_modulation, position_ids=position_ids,
+            )
+        else:
+            attn_out, new_kv_cache = self.self_attn(
+                normed_input, cos, sin, attention_mask=attention_mask, kv_cache=kv_cache, kv_modulation=kv_modulation
+            )
         hidden_states = hidden_states + attn_out * residual_scale
 
         normed_attn = self.post_attention_layernorm(hidden_states)
@@ -1277,9 +1331,13 @@ class TransformerLayer(nn.Module):
             attention_mask = kwargs.get("attention_mask", args[3] if len(args) > 3 else None)
             residual_scale = kwargs.get("residual_scale", args[4] if len(args) > 4 else 1.0)
             kv_modulation = kwargs.get("kv_modulation", None)
+            position_ids = kwargs.get("position_ids", None)
 
             def ckpt_fn(hs):
-                out, _, aux = self._forward(hs, cos, sin, attention_mask, residual_scale, kv_modulation=kv_modulation)
+                out, _, aux = self._forward(
+                    hs, cos, sin, attention_mask, residual_scale,
+                    kv_modulation=kv_modulation, position_ids=position_ids,
+                )
                 return out, aux
 
             out, aux = torch.utils.checkpoint.checkpoint(ckpt_fn, hidden_states, use_reentrant=False)
@@ -1707,12 +1765,21 @@ def create_rhen_branch_mask(
     branch_lens: List[int],
     device: torch.device = torch.device("cpu"),
     dtype: torch.dtype = torch.float32,
+    branch_option_spans: Optional[List[List[Tuple[int, int]]]] = None,
+    isolate_options: bool = False,
 ) -> torch.Tensor:
     """
     Constructs a 2D Block-Causal Branch Mask for parallel multi-question evaluation over shared state.
     """
     from rhen.optim.rhen_mask import Rhen2DBranchMask
-    return Rhen2DBranchMask.create_mask(state_len, branch_lens, device=device, dtype=dtype)
+    return Rhen2DBranchMask.create_mask(
+        state_len,
+        branch_lens,
+        device=device,
+        dtype=dtype,
+        branch_option_spans=branch_option_spans,
+        isolate_options=isolate_options,
+    )
 
 
 class RhenLatentDecisionEngine(nn.Module):
@@ -2019,6 +2086,8 @@ class RecurrentCoreBlock(nn.Module):
         use_rhen: bool = False,
         layer_caches: Optional[List[Any]] = None,
         ssm_prefix: Optional[Dict[str, Any]] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        isolate_options: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """One recurrent step.
 
@@ -2049,7 +2118,12 @@ class RecurrentCoreBlock(nn.Module):
 
         # State-Space Memory Highway
         if self.ssm_highway is not None:
-            hidden_states = self.ssm_highway(hidden_states, step_idx=step_idx, prefix_state=ssm_prefix)
+            hidden_states = self.ssm_highway(
+                hidden_states,
+                step_idx=step_idx,
+                prefix_state=ssm_prefix,
+                pooling_mask=attention_mask if isolate_options else None,
+            )
 
         # Cross-Loop Attention
         if self.cross_loop_attn is not None and step_idx > 1:
@@ -2075,11 +2149,13 @@ class RecurrentCoreBlock(nn.Module):
                 hidden_states, new_cache, aux_loss = layer(
                     hidden_states, cos, sin, attention_mask=attention_mask, residual_scale=residual_scale,
                     kv_cache=layer_caches[layer_idx], kv_modulation=kv_modulation,
+                    position_ids=position_ids,
                 )
                 layer_caches[layer_idx] = new_cache
             else:
                 hidden_states, _, aux_loss = layer(
-                    hidden_states, cos, sin, attention_mask=attention_mask, residual_scale=residual_scale, kv_modulation=kv_modulation
+                    hidden_states, cos, sin, attention_mask=attention_mask, residual_scale=residual_scale,
+                    kv_modulation=kv_modulation, position_ids=position_ids,
                 )
             total_aux_loss = total_aux_loss + aux_loss
 
@@ -3090,20 +3166,70 @@ class EOSModel(PreTrainedModel):
         the MultiHeadRhenPointerHead to return differentiable probability and logit tensors.
         """
         try:
-            from rhen.rhen_packer import PackedRhenSequence, get_rhen_packer
+            from rhen.rhen_packer import (
+                PackedRhenSequence,
+                build_isolated_position_ids,
+                extract_branch_option_spans,
+                get_rhen_packer,
+            )
         except ImportError:
-            from rhen_packer import PackedRhenSequence, get_rhen_packer
+            from rhen_packer import (
+                PackedRhenSequence,
+                build_isolated_position_ids,
+                extract_branch_option_spans,
+                get_rhen_packer,
+            )
 
+        isolate_cfg = bool(getattr(self.config, "isolate_branch_options", False))
         if isinstance(packed_or_state, PackedRhenSequence):
             packed = packed_or_state
         else:
-            packer = get_rhen_packer(tokenizer)
-            packed = packer.pack(state=packed_or_state, questions_and_options=questions_and_options or [])
+            packer = get_rhen_packer(tokenizer, isolate_branch_options=isolate_cfg)
+            packed = packer.pack(
+                state=packed_or_state,
+                questions_and_options=questions_and_options or [],
+                isolate_branch_options=isolate_cfg,
+            )
 
         input_ids = packed.input_ids.to(self.embed_tokens.weight.device)
         attention_mask = packed.attention_mask.to(self.embed_tokens.weight.device)
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
+
+        # Option isolation mask & RoPE position reset (from packed or config override)
+        position_ids = getattr(packed, "position_ids", None)
+        isolate_active = position_ids is not None or isolate_cfg
+        if isolate_cfg and position_ids is None:
+            branch_option_spans = extract_branch_option_spans(packed.branches)
+            from rhen.optim.rhen_mask import Rhen2DBranchMask
+            if not getattr(packed, "is_speculative_tree", False):
+                attention_mask = Rhen2DBranchMask.create_mask(
+                    state_length=packed.state_length,
+                    branch_lengths=packed.branch_lengths,
+                    device=device,
+                    dtype=attention_mask.dtype,
+                    branch_option_spans=branch_option_spans,
+                    isolate_options=True,
+                )
+            else:
+                attention_mask = attention_mask.clone()
+                branch_offsets = []
+                curr = packed.state_length
+                for b_len in packed.branch_lengths:
+                    branch_offsets.append((curr, curr + b_len))
+                    curr += b_len
+                Rhen2DBranchMask.apply_option_isolation(
+                    attention_mask[0, 0], branch_offsets, branch_option_spans
+                )
+            position_ids = build_isolated_position_ids(
+                state_length=packed.state_length,
+                branch_lengths=packed.branch_lengths,
+                branch_option_spans=branch_option_spans,
+                total_len=seq_len,
+                device=device,
+            )
+        elif position_ids is not None:
+            position_ids = position_ids.to(device=device, dtype=torch.long)
 
         # Reset recurrent special states
         self.recurrent_core.reset_special_parameters()
@@ -3160,9 +3286,16 @@ class EOSModel(PreTrainedModel):
                             proj_slot = proj_slot.squeeze(1)
                         hidden_states[:, slot_idx, :] = proj_slot
 
-        cos_full, sin_full = self.rope_emb(hidden_states, seq_len)
-        cos = cos_full[:seq_len]
-        sin = sin_full[:seq_len]
+        if position_ids is not None:
+            pos_idx = position_ids.squeeze(0) if position_ids.ndim == 2 and position_ids.shape[0] == 1 else position_ids
+            max_pos = max(seq_len, int(pos_idx.max().item()) + 1) if pos_idx.numel() > 0 else seq_len
+            cos_full, sin_full = self.rope_emb(hidden_states, max_pos)
+            cos = cos_full[pos_idx]
+            sin = sin_full[pos_idx]
+        else:
+            cos_full, sin_full = self.rope_emb(hidden_states, seq_len)
+            cos = cos_full[:seq_len]
+            sin = sin_full[:seq_len]
 
         # State descriptor priming for hypothesis slots
         if packed.state_length > 0 and self._core_block.rhen is not None:
@@ -3171,7 +3304,9 @@ class EOSModel(PreTrainedModel):
 
         # Pre-Layers -> Shallow representation H_shallow
         for layer in self.pre_layers:
-            hidden_states, _, _ = layer(hidden_states, cos, sin, attention_mask=attention_mask)
+            hidden_states, _, _ = layer(
+                hidden_states, cos, sin, attention_mask=attention_mask, position_ids=position_ids
+            )
         h_shallow = hidden_states
 
         # Recurrent Core with 2D Block-Causal Masking -> Middle representation H_middle
@@ -3186,12 +3321,16 @@ class EOSModel(PreTrainedModel):
                 attention_mask=attention_mask,
                 residual_scale=residual_scale,
                 use_rhen=True,
+                position_ids=position_ids,
+                isolate_options=isolate_active,
             )
         h_middle = hidden_states
 
         # Post-Layers & Norm -> Deep representation H_deep
         for layer in self.post_layers:
-            hidden_states, _, _ = layer(hidden_states, cos, sin, attention_mask=attention_mask)
+            hidden_states, _, _ = layer(
+                hidden_states, cos, sin, attention_mask=attention_mask, position_ids=position_ids
+            )
         h_deep = self.norm(hidden_states)  # [1, seq_len, hidden_dim]
 
         # Non-autoregressive decision extraction per branch using Hierarchical Multi-Layer Latent Fusion
@@ -3588,7 +3727,7 @@ class EOSModel(PreTrainedModel):
             self.train(was_training)
 
     @torch.no_grad()
-    def decide_noul(self, state: Any, proposition: str, tokenizer = None) -> Dict[str, Any]:
+    def decide_noul(self, state: Any, proposition: str, tokenizer = None, num_loops: Optional[int] = None) -> Dict[str, Any]:
         """
         Noul Primitive: Evaluates a binary semantic truth proposition (Yes/No).
         Returns probability of truth P in [0, 1].
@@ -3597,6 +3736,7 @@ class EOSModel(PreTrainedModel):
             packed_or_state=state,
             questions_and_options=[(proposition, ["Yes", "No"])],
             tokenizer=tokenizer,
+            num_loops=num_loops,
         )
         res = results[0]
         p_true = res["probabilities"][0]
@@ -3610,7 +3750,7 @@ class EOSModel(PreTrainedModel):
         }
 
     @torch.no_grad()
-    def decide_choice(self, state: Any, question: str, options: List[str], tokenizer = None) -> Dict[str, Any]:
+    def decide_choice(self, state: Any, question: str, options: List[str], tokenizer = None, num_loops: Optional[int] = None) -> Dict[str, Any]:
         """
         Choice Primitive: Evaluates categorical option selection (1 of K).
         Returns winning option, probability distribution summing to 1.0, and confidence.
@@ -3619,6 +3759,7 @@ class EOSModel(PreTrainedModel):
             packed_or_state=state,
             questions_and_options=[(question, options)],
             tokenizer=tokenizer,
+            num_loops=num_loops,
         )
         res = results[0]
         K = max(len(options), 2)
@@ -3643,6 +3784,7 @@ class EOSModel(PreTrainedModel):
         min_score: float = 0.0,
         max_score: float = 10.0,
         tokenizer = None,
+        num_loops: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Score Primitive: Evaluates an ordered discrete spectrum of levels.
@@ -3654,6 +3796,7 @@ class EOSModel(PreTrainedModel):
             packed_or_state=state,
             questions_and_options=[(question, levels)],
             tokenizer=tokenizer,
+            num_loops=num_loops,
         )
         res = results[0]
         probs = res["probabilities"]
@@ -3688,6 +3831,7 @@ class EOSModel(PreTrainedModel):
         options: List[str],
         threshold: float = 0.5,
         tokenizer = None,
+        num_loops: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         MultiChoice Primitive: Evaluates independent multi-label selection above calibrated threshold.
@@ -3696,6 +3840,7 @@ class EOSModel(PreTrainedModel):
             packed_or_state=state,
             questions_and_options=[(question, options, "multichoice", {"threshold": threshold})],
             tokenizer=tokenizer,
+            num_loops=num_loops,
         )
         res = results[0]
         prob_dict = {opt: p for opt, p in zip(options, res["probabilities"])}
@@ -3719,6 +3864,7 @@ class EOSModel(PreTrainedModel):
         min_val: float = 0.0,
         max_val: float = 100.0,
         tokenizer = None,
+        num_loops: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Range Primitive: Evaluates bounded continuous interval regression [min_val, max_val].
@@ -3727,6 +3873,7 @@ class EOSModel(PreTrainedModel):
             packed_or_state=state,
             questions_and_options=[(question, [str(min_val), str(max_val)], "range", {"min_val": min_val, "max_val": max_val})],
             tokenizer=tokenizer,
+            num_loops=num_loops,
         )
         res = results[0]
         return {
@@ -3748,6 +3895,7 @@ class EOSModel(PreTrainedModel):
         slot_name: str,
         query: str = "",
         tokenizer = None,
+        num_loops: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Extract Primitive: Non-autoregressively extracts structured token span for slot_name from state.
@@ -3757,6 +3905,7 @@ class EOSModel(PreTrainedModel):
             packed_or_state=state,
             questions_and_options=[(q_text, [], "extract", {"slot_name": slot_name})],
             tokenizer=tokenizer,
+            num_loops=num_loops,
         )
         res = results[0]
         return {
@@ -3775,6 +3924,7 @@ class EOSModel(PreTrainedModel):
         state: Any,
         questions_and_options: List[Tuple[str, List[str]]],
         tokenizer = None,
+        num_loops: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Evaluates multiple typed questions concurrently over a single state
@@ -3784,6 +3934,7 @@ class EOSModel(PreTrainedModel):
             packed_or_state=state,
             questions_and_options=questions_and_options,
             tokenizer=tokenizer,
+            num_loops=num_loops,
         )
 
     @torch.no_grad()

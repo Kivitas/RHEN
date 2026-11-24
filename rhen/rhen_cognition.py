@@ -168,8 +168,12 @@ class RLCDOptimizer:
         one_hot = 1.0 if idx == int(label_index) else 0.0
         calibration = (p - one_hot) ** 2
 
-        best = float(probs.max())
-        margin = max(0.0, best - p) if correct > 0 else 0.0
+        if correct > 0:
+            other_probs = [float(probs[i]) for i in range(probs.numel()) if i != idx]
+            runner_up = max(other_probs) if other_probs else 0.0
+            margin = max(0.0, p - runner_up)
+        else:
+            margin = 0.0
 
         total = correct - self.calibration_weight * calibration + self.margin_weight * margin
         return RLCDReward(
@@ -185,15 +189,22 @@ class RLCDOptimizer:
         logits: torch.Tensor,
         label_index: int,
         optimizer: Optional[torch.optim.Optimizer] = None,
+        old_logits: Optional[torch.Tensor] = None,
+        num_epochs: int = 1,
     ) -> Dict[str, Any]:
         """
-        Perform one GRPO update on a single decision distribution.
+        Perform one or more GRPO / PPO updates on a single decision distribution.
 
         Args:
             logits: 1-D tensor of raw option scores (ideally requires grad).
             label_index: index of the ground-truth option.
             optimizer: optimiser whose graph includes ``logits``. When ``None``
                 the method computes diagnostics only and mutates nothing.
+            old_logits: optional 1-D tensor of pre-update / rollout option scores.
+                When provided, importance sampling ratios and the KL penalty are
+                measured against ``old_logits``; otherwise a detached snapshot of
+                ``logits`` before the first epoch is used as the reference policy.
+            num_epochs: number of inner PPO update epochs over the sampled group.
 
         Returns:
             Dict with mean reward, advantage spread, KL, gradient norm and the
@@ -203,9 +214,19 @@ class RLCDOptimizer:
             raise ValueError("policy_gradient_step expects a 1-D logits tensor")
 
         probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
         k = int(probs.numel())
         if k == 0:
             raise ValueError("cannot run RLCD on an empty option set")
+
+        if old_logits is not None:
+            if old_logits.shape != logits.shape:
+                raise ValueError("old_logits must have the same shape as logits")
+            ref_log_probs = F.log_softmax(old_logits.detach(), dim=-1)
+            ref_probs = F.softmax(old_logits.detach(), dim=-1)
+        else:
+            ref_log_probs = log_probs.detach()
+            ref_probs = probs.detach()
 
         # Sample a group of candidate indices.
         group = torch.randint(
@@ -215,39 +236,51 @@ class RLCDOptimizer:
             # Always include the label so the advantage signal is non-degenerate.
             group[0] = int(label_index)
 
-        # Score the group.
+        # Score the group against the reference / rollout distribution.
         rewards: List[RLCDReward] = []
-        log_probs = torch.log(probs.clamp_min(1e-12))
+        ref_probs_list = ref_probs.tolist()
         for g in group.tolist():
-            rewards.append(self.compute_reward(probs.detach().tolist(), g, label_index))
+            rewards.append(self.compute_reward(ref_probs_list, g, label_index))
 
-        reward_tensor = torch.tensor([r.total for r in rewards], dtype=torch.float32)
+        reward_tensor = torch.tensor(
+            [r.total for r in rewards], dtype=logits.dtype, device=logits.device
+        )
         mean_r = reward_tensor.mean()
         std_r = reward_tensor.std(unbiased=False)
         advantages = (reward_tensor - mean_r) / (std_r + 1e-6)
 
-        # Clipped surrogate objective over the sampled group.
-        ratio = torch.exp(log_probs[group] - log_probs[group].detach())
-        unclipped = ratio * advantages
-        clipped = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * advantages
-        policy_loss = -torch.mean(torch.min(unclipped, clipped))
-
-        # KL penalty toward the pre-update policy.
-        with torch.no_grad():
-            ref_probs = probs.detach()
-        kl = torch.sum(
-            ref_probs
-            * (torch.log(ref_probs.clamp_min(1e-12)) - torch.log(probs.clamp_min(1e-12)))
-        )
-        loss = policy_loss + self.kl_coef * kl
-
+        epochs = max(1, int(num_epochs))
         grad_norm = 0.0
-        if optimizer is not None and logits.requires_grad:
-            optimizer.zero_grad()
-            loss.backward()
-            if logits.grad is not None:
-                grad_norm = float(logits.grad.norm())
-            optimizer.step()
+        clipped_fraction = 0.0
+        loss = torch.zeros((), dtype=logits.dtype, device=logits.device)
+        kl = torch.zeros((), dtype=logits.dtype, device=logits.device)
+        ratio = torch.ones_like(advantages)
+
+        for _ in range(epochs):
+            curr_log_probs = F.log_softmax(logits, dim=-1)
+
+            # Clipped surrogate objective over the sampled group.
+            ratio = torch.exp(curr_log_probs[group] - ref_log_probs[group])
+            unclipped = ratio * advantages
+            clipped = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * advantages
+            policy_loss = -torch.mean(torch.min(unclipped, clipped))
+
+            # Analytical KL penalty D_KL(pi_ref || pi_theta) toward the reference policy.
+            kl = F.kl_div(curr_log_probs, ref_probs, reduction="sum")
+            loss = policy_loss + self.kl_coef * kl
+
+            with torch.no_grad():
+                is_clipped = (ratio < (1.0 - self.clip_eps)) | (ratio > (1.0 + self.clip_eps))
+                clipped_fraction = float(is_clipped.float().mean().item())
+
+            if optimizer is not None and logits.requires_grad:
+                optimizer.zero_grad()
+                loss.backward()
+                if logits.grad is not None:
+                    grad_norm = float(logits.grad.norm())
+                optimizer.step()
+            else:
+                break
 
         self.step_count += 1
         self.reward_history.append(float(mean_r))
@@ -258,6 +291,9 @@ class RLCDOptimizer:
             "advantage_spread": float(std_r),
             "kl": float(kl.detach()),
             "grad_norm": grad_norm,
+            "ratios": [float(x) for x in ratio.detach().tolist()],
+            "clipped_fraction": clipped_fraction,
+            "num_epochs": epochs,
             "sampled_indices": group.tolist(),
             "rewards": [r.to_dict() for r in rewards],
         }

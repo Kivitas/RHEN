@@ -29,6 +29,7 @@ QUANTILE_LEVELS: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.
 MEDIAN_INDEX: int = 4
 
 _LEVELS_ARR = np.asarray(QUANTILE_LEVELS, dtype=np.float64)
+_INV_SQRT2 = 1.0 / math.sqrt(2.0)
 _TIMESFM_INSTALL_HINT = 'pip install "timesfm[torch]>=3.0.2"'
 _TIMESFM_LICENSE_MESSAGE = (
     "TimesFM 3.0 pretrained weights (google/timesfm-3.0-pytorch) are released under the "
@@ -106,6 +107,41 @@ def _exceed_at(row: np.ndarray, threshold: float) -> float:
         cdf = p[k] + (threshold - q[k]) * (p[k + 1] - p[k]) / (q[k + 1] - q[k])
     cdf = min(1.0, max(0.0, float(cdf)))
     return 1.0 - cdf
+
+
+def _invert_quantile_row(row: np.ndarray, u: np.ndarray) -> np.ndarray:
+    """Invert the step-wise piecewise-linear CDF at uniform probabilities ``u`` in (0, 1).
+
+    Matches ``_exceed_at`` on every segment, tie, tail extrapolation, and zero-spread point mass.
+    """
+    q = row
+    p = _LEVELS_ARR
+    positive = np.nonzero(np.diff(q) > 0)[0]
+    if positive.size == 0:
+        return np.full_like(u, q[0], dtype=np.float64)
+    y = np.interp(u, p, q)
+    low_mask = u < p[0]
+    if np.any(low_mask):
+        k = int(positive[0])
+        inv_slope = (q[k + 1] - q[k]) / (p[k + 1] - p[k])
+        y[low_mask] = q[0] + (u[low_mask] - p[0]) * inv_slope
+    high_mask = u > p[-1]
+    if np.any(high_mask):
+        k = int(positive[-1])
+        inv_slope = (q[k + 1] - q[k]) / (p[k + 1] - p[k])
+        y[high_mask] = q[-1] + (u[high_mask] - p[-1]) * inv_slope
+    return y
+
+
+def _normal_cdf(z: np.ndarray) -> np.ndarray:
+    """Element-wise standard normal CDF Phi(z) using math.erfc (no SciPy required)."""
+    flat = z.ravel()
+    out = np.fromiter(
+        (0.5 * math.erfc(-float(v) * _INV_SQRT2) for v in flat),
+        dtype=np.float64,
+        count=flat.size,
+    )
+    return out.reshape(z.shape)
 
 
 @dataclass
@@ -212,17 +248,81 @@ class Forecast:
             raise IndexError(f"step {step} is outside the horizon of {self.horizon}")
         return _exceed_at(rows[int(step)], thr)
 
-    def uncertainty(self) -> float:
+    def copula_breach_prob(
+        self,
+        threshold: float,
+        rho: float = 0.7,
+        num_samples: int = 2000,
+        seed: int = 0,
+    ) -> float:
+        """Estimate P(max_t Y_t > threshold) using a stationary AR(1) Gaussian copula.
+
+        Draws latent Gaussian paths ``Z_t = rho * Z_{t-1} + sqrt(1 - rho^2) * eps_t``,
+        transforms to uniform marginals ``U_t = Phi(Z_t)``, inverts each step through
+        the piecewise-linear quantile function, and computes the empirical fraction of
+        paths whose horizon maximum exceeds ``threshold``.
+
+        The returned estimate is always clamped within the exact Fréchet-Hoeffding bounds
+        ``[prob_exceeds(threshold, step=None), min(1.0, sum(step_exceedance_probs(threshold)))]``.
+        """
+        rows = self._require_quantiles()
+        thr = float(threshold)
+        rho_f = float(rho)
+        if not math.isfinite(rho_f) or not -1.0 <= rho_f <= 1.0:
+            raise ValueError(f"rho must be finite and in [-1, 1], got {rho}")
+        if isinstance(num_samples, bool) or not isinstance(num_samples, (int, np.integer)) or num_samples < 1:
+            raise ValueError(f"num_samples must be an integer >= 1, got {num_samples}")
+        n = int(num_samples)
+
+        step_probs = self.step_exceedance_probs(thr)
+        lower_bound = float(max(step_probs))
+        upper_bound = float(min(1.0, sum(step_probs)))
+        if self.horizon == 1 or lower_bound >= upper_bound or rho_f == 1.0:
+            return lower_bound
+
+        rng = np.random.default_rng(int(seed))
+        # Antithetic normal draws reduce Monte Carlo variance while preserving exact N(0, 1) marginals.
+        half = n // 2
+        if half > 0:
+            base = rng.standard_normal((half, self.horizon))
+            if n % 2 == 1:
+                extra = rng.standard_normal((1, self.horizon))
+                eps = np.concatenate([base, -base, extra], axis=0)
+            else:
+                eps = np.concatenate([base, -base], axis=0)
+        else:
+            eps = rng.standard_normal((n, self.horizon))
+
+        z = np.empty_like(eps)
+        z[:, 0] = eps[:, 0]
+        innov_scale = math.sqrt(max(0.0, 1.0 - rho_f * rho_f))
+        for t in range(1, self.horizon):
+            z[:, t] = rho_f * z[:, t - 1] + innov_scale * eps[:, t]
+
+        u = _normal_cdf(z)
+        breached = np.zeros(n, dtype=bool)
+        for t in range(self.horizon):
+            y_t = _invert_quantile_row(rows[t], u[:, t])
+            breached |= y_t > thr
+
+        est = float(np.mean(breached))
+        return float(min(upper_bound, max(lower_bound, est)))
+
+    def uncertainty(self, scale_floor: float = 1e-12) -> float:
         """Mean relative width of the 80% band across the horizon.
 
-        Each step contributes ``(upper - lower) / max(|median|, 1e-12)``, so the value is
-        scale-dependent: series near zero produce large values. Returns ``math.inf`` when
-        the forecast carries no quantiles, so that unknown uncertainty fails closed.
+        Each step contributes ``(upper - lower) / max(|median|, scale_floor)``, so the value is
+        scale-dependent: series near zero produce large values unless a larger ``scale_floor``
+        (e.g., ``1.0``) is passed. Returns ``math.inf`` when the forecast carries no quantiles,
+        so that unknown uncertainty fails closed.
         """
+        floor = float(scale_floor)
+        if not math.isfinite(floor) or floor <= 0.0:
+            raise ValueError(f"scale_floor must be a positive finite number, got {scale_floor}")
         if self.quantiles is None:
             return math.inf
         lower, upper = self.interval(0.8)
-        rel = [(hi - lo) / max(abs(m), 1e-12) for lo, hi, m in zip(lower, upper, self.mean)]
+        rel = [(hi - lo) / max(abs(m), floor) for lo, hi, m in zip(lower, upper, self.mean)]
         return float(sum(rel) / len(rel))
 
     # ------------------------------------------------------------ serialization

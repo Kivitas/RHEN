@@ -39,6 +39,7 @@ multi-label ``MultiChoice``), matching the original formulation.
 """
 
 import json
+import math
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -377,15 +378,38 @@ def compute_rhen_multi_task_loss(
             alpha = res.get("alpha_tensor", None)
             beta = res.get("beta_tensor", None)
             if alpha is not None and beta is not None:
-                mu_norm = alpha / (alpha + beta)
-                loss_range = (mu_norm[0, 0] - norm_target).pow(2)
+                alpha_d = alpha.to(device)
+                beta_d = beta.to(device)
+                ab = alpha_d + beta_d
+                mu_norm = alpha_d / ab
+                var_norm = (alpha_d * beta_d) / (ab.pow(2) * (ab + 1.0))
+                mse_range = (mu_norm[0, 0] - norm_target).pow(2)
+
+                y_clamped = min(max(norm_target, 1e-4), 1.0 - 1e-4)
+                a0 = alpha_d[0, 0]
+                b0 = beta_d[0, 0]
+                ab0 = ab[0, 0]
+                nll_beta = (
+                    torch.lgamma(a0)
+                    + torch.lgamma(b0)
+                    - torch.lgamma(ab0)
+                    - (a0 - 1.0) * math.log(y_clamped)
+                    - (b0 - 1.0) * math.log(1.0 - y_clamped)
+                )
+                target_var = (mu_norm[0, 0].detach() - norm_target).pow(2).clamp(1e-4, 0.25)
+                var_calib = (var_norm[0, 0] - target_var).pow(2) + 0.05 * F.softplus(nll_beta)
+                loss_range = mse_range + var_calib
+                loss_breakdown[f"b{branch_idx}_range_mse"] = mse_range.item()
+                loss_breakdown[f"b{branch_idx}_range_var_calib"] = var_calib.item()
             else:
                 pred_val = float(res.get("expected_value", (min_v + max_v) / 2.0))
-                loss_range = torch.tensor(
+                mse_range = torch.tensor(
                     ((pred_val - target_val) / max(max_v - min_v, 1e-6)) ** 2, device=device
                 )
+                loss_range = mse_range
+                loss_breakdown[f"b{branch_idx}_range_mse"] = mse_range.item()
+                loss_breakdown[f"b{branch_idx}_range_var_calib"] = 0.0
             total_loss = total_loss + loss_range
-            loss_breakdown[f"b{branch_idx}_range_mse"] = loss_range.item()
 
         elif getattr(branch_meta, "primitive_type", "choice") == "extract" or (
             isinstance(label, tuple) and len(label) == 2

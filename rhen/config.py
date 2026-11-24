@@ -227,6 +227,7 @@ class RhenEngineConfig:
     rhen_halt_confidence_threshold: float = 0.85
     rhen_enable_kv_modulation: bool = True
     rhen_enable_meta_cognitive: bool = True          # live: gates MetaCognitiveMonitor self-correction flags
+    isolate_branch_options: bool = False             # isolate intra-branch options via attention mask & RoPE reset
 
 
 @dataclass
@@ -292,6 +293,54 @@ for _group_cls in (
 del _group_cls
 
 
+#: Supported reasoning effort levels for fast vs. deep thinking configs.
+EFFORT_LEVELS = ("low", "medium", "high")
+
+_EFFORT_PRESETS = {
+    "low": dict(
+        hidden_size=128,
+        intermediate_size=256,
+        num_pre_layers=1,
+        num_recurrent_layers=1,
+        num_post_layers=1,
+        max_recurrent_loops=1,
+        min_recurrent_loops=1,
+        act_min_loops=1,
+        thinking_budget_min_loops=1,
+        thinking_budget_max_loops=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        kv_lora_rank=32,
+        q_lora_rank=64,
+        rhen_hidden_dim=64,
+        rhen_pointer_rank=32,
+        use_moe=False,
+        use_shared_expert_moe=False,
+    ),
+    "medium": dict(
+        hidden_size=256,
+        intermediate_size=512,
+        num_pre_layers=1,
+        num_recurrent_layers=2,
+        num_post_layers=1,
+        max_recurrent_loops=4,
+        min_recurrent_loops=2,
+        act_min_loops=2,
+        thinking_budget_min_loops=2,
+        thinking_budget_max_loops=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        kv_lora_rank=64,
+        q_lora_rank=128,
+        rhen_hidden_dim=128,
+        rhen_pointer_rank=64,
+        use_moe=False,
+        use_shared_expert_moe=False,
+    ),
+    "high": {},
+}
+
+
 #: The eight group keywords accepted alongside the flat kwargs.
 CONFIG_GROUP_NAMES = (
     "recurrent",
@@ -351,6 +400,25 @@ class EOSConfig(PretrainedConfig):
         config_dict = dict(config_dict)
         _pop_removed_legacy_keys(cls.__name__, config_dict, kwargs)
         return super().from_dict(config_dict, **kwargs)
+
+    @classmethod
+    def from_effort(cls, effort: str = "medium", **overrides) -> "EOSConfig":
+        """Build an EOSConfig tuned for the requested reasoning effort level.
+
+        Levels:
+            - ``"low"``: fast CPU/edge config (128d, 1 loop, dense SwiGLU).
+            - ``"medium"``: balanced config (256d, up to 4 loops, dense SwiGLU).
+            - ``"high"``: full 50-effective-layer deep-thinking MoE config.
+        """
+        effort_key = str(effort).strip().lower()
+        if effort_key not in EFFORT_LEVELS:
+            raise ValueError(
+                f"Unknown effort level {effort!r}; choose from {EFFORT_LEVELS}"
+            )
+        params = dict(_EFFORT_PRESETS[effort_key])
+        params["effort"] = effort_key
+        params.update(overrides)
+        return cls(**params)
 
     def __init__(
         self,
@@ -519,6 +587,10 @@ class EOSConfig(PretrainedConfig):
         # ---- Removed no-op keys: accept, drop, warn (see _REMOVED_LEGACY_KEYS) ----
         _pop_removed_legacy_keys(type(self).__name__, kwargs)
 
+        # Flat kwargs handled via **kwargs to preserve the historical flat signature surface.
+        isolate_branch_options = kwargs.pop("isolate_branch_options", None)
+        effort = kwargs.pop("effort", None)
+
         # ---- Resolve the eight groups -------------------------------------
         # Defaults live in the group dataclasses; explicit flat kwargs (the
         # non-None sentinel values below) override them; a passed group object
@@ -624,6 +696,7 @@ class EOSConfig(PretrainedConfig):
             rhen_halt_confidence_threshold=rhen_halt_confidence_threshold,
             rhen_enable_kv_modulation=rhen_enable_kv_modulation,
             rhen_enable_meta_cognitive=rhen_enable_meta_cognitive,
+            isolate_branch_options=isolate_branch_options,
         )))
         loop_control_g = LoopControlConfig(**_merge_group(loop_control_g, dict(
             enable_step_size_control=enable_step_size_control,
@@ -670,6 +743,15 @@ class EOSConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
+        if effort is not None:
+            effort_norm = str(effort).strip().lower()
+            if effort_norm not in EFFORT_LEVELS:
+                raise ValueError(
+                    f"Unknown effort level {effort!r}; choose from {EFFORT_LEVELS}"
+                )
+            self.effort = effort_norm
+        else:
+            self.effort = "high"
 
         # ---- Flatten: RecurrentLoopConfig ----------------------------------
         self.num_pre_layers = recurrent_g.num_pre_layers
@@ -894,6 +976,7 @@ LoopedLLMConfig = EOSConfig
 RhenConfig = EOSConfig
 
 __all__ = [
+    "EFFORT_LEVELS",
     "RhenConfig",
     "EOSConfig",
     "LoopedLLMConfig",

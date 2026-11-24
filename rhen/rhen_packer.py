@@ -152,6 +152,92 @@ class PackedRhenSequence:
     latent_tensors: Optional[Dict[str, torch.Tensor]] = None
     latent_slot_indices: Optional[List[int]] = None
     is_speculative_tree: bool = False
+    position_ids: Optional[torch.Tensor] = None
+
+
+def extract_branch_option_spans(
+    branches: List[PackedBranchMeta],
+) -> List[List[Tuple[int, int]]]:
+    """Build inclusive per-branch option token spans ``(s_k, span_end_k)``.
+
+    Each option span starts at its ``<|opt|>`` token (``option_start_indices[k]``) and
+    extends through its ``<|/opt|>`` token and any trailing separator token up to the
+    next option's start (``starts[k + 1] - 1``) or the token immediately preceding
+    ``<|decide|>`` for the last option.
+    """
+    all_spans: List[List[Tuple[int, int]]] = []
+    for meta in branches:
+        starts = getattr(meta, "option_start_indices", None)
+        ends = getattr(meta, "option_end_indices", None)
+        if not starts or not ends or len(starts) != len(ends):
+            all_spans.append([])
+            continue
+        spans: List[Tuple[int, int]] = []
+        num_opts = len(starts)
+        for k in range(num_opts):
+            s = int(starts[k])
+            e = int(ends[k])
+            if k + 1 < num_opts:
+                span_end = max(e, int(starts[k + 1]) - 1)
+            else:
+                decide_idx = int(getattr(meta, "decide_idx", e))
+                span_end = max(e, decide_idx - 1) if decide_idx > e else e
+            spans.append((s, span_end))
+        all_spans.append(spans)
+    return all_spans
+
+
+def build_isolated_position_ids(
+    state_length: int,
+    branch_lengths: List[int],
+    branch_option_spans: List[List[Tuple[int, int]]],
+    total_len: int,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Construct ``(1, seq_len)`` position IDs with per-option RoPE position reset.
+
+    - State tokens: ``0 .. state_length - 1``.
+    - Each branch's question prefix starts at ``state_length``.
+    - Every option span ``[s_k .. e_k]`` resets its position counter to
+      ``question_end_pos + 1``.
+    - ``<|decide|>`` (and any trailing trigger tokens) starts at
+      ``question_end_pos + 1 + max_opt_len``.
+    """
+    pos = list(range(total_len))
+    curr_offset = state_length
+    for b_idx, b_len in enumerate(branch_lengths):
+        if b_len <= 0:
+            continue
+        b_start = curr_offset
+        b_end = curr_offset + b_len
+        spans = branch_option_spans[b_idx] if b_idx < len(branch_option_spans) else []
+        if not spans:
+            for idx in range(b_start, b_end):
+                pos[idx] = state_length + (idx - b_start)
+        else:
+            first_opt_start = spans[0][0]
+            q_len = max(0, first_opt_start - b_start)
+            for idx in range(b_start, min(first_opt_start, b_end)):
+                pos[idx] = state_length + (idx - b_start)
+            opt_base_pos = state_length + q_len
+            max_opt_len = 0
+            last_opt_end = first_opt_start - 1
+            for s_k, e_k in spans:
+                opt_len = max(0, e_k - s_k + 1)
+                if opt_len > max_opt_len:
+                    max_opt_len = opt_len
+                if e_k > last_opt_end:
+                    last_opt_end = e_k
+                for off in range(opt_len):
+                    tok_idx = s_k + off
+                    if b_start <= tok_idx < b_end:
+                        pos[tok_idx] = opt_base_pos + off
+            decide_base_pos = opt_base_pos + max_opt_len
+            for off, tok_idx in enumerate(range(last_opt_end + 1, b_end)):
+                if b_start <= tok_idx < b_end:
+                    pos[tok_idx] = decide_base_pos + off
+        curr_offset = b_end
+    return torch.tensor([pos], dtype=torch.long, device=device)
 
 
 def _parse_question_item(item: Any) -> Tuple[str, List[str], str, Optional[Dict[str, Any]]]:
@@ -240,9 +326,11 @@ class RhenPacker:
     and exact coordinate extraction for <|decide|> (query) and <|/opt|> (option candidates).
     """
 
-    def __init__(self, tokenizer=None, max_depth: int = 16):
+    def __init__(self, tokenizer=None, max_depth: int = 16, isolate_branch_options: bool = False):
         self.tokenizer = tokenizer if tokenizer is not None else get_tokenizer()
         self.max_depth = max_depth
+        self.isolate_branch_options = bool(isolate_branch_options)
+        self._opt_token_cache: Dict[str, List[int]] = {}
 
     def serialize_state(
         self,
@@ -288,15 +376,23 @@ class RhenPacker:
         all_ids.extend(q_ids)
         depth_list.extend([1] * len(q_ids))
 
+        opt_end_token_id = getattr(self.tokenizer, "opt_end_token_id", None)
+        if opt_end_token_id is None:
+            opt_end_token_id = self.tokenizer.encode(OPTION_END_TOKEN)[-1]
+
         opt_end_indices = []
         opt_start_indices = []
+        opt_cache = self._opt_token_cache
         for opt in clean_options:
             opt_str = f"{OPTION_START_TOKEN} {opt} {OPTION_END_TOKEN} "
-            opt_ids = self.tokenizer.encode(opt_str)
+            opt_ids = opt_cache.get(opt_str)
+            if opt_ids is None:
+                opt_ids = self.tokenizer.encode(opt_str)
+                if len(opt_cache) < 16384:
+                    opt_cache[opt_str] = opt_ids
             opt_start_indices.append(len(all_ids))
             all_ids.extend(opt_ids)
             depth_list.extend([2] * len(opt_ids))
-            opt_end_token_id = self.tokenizer.encode(OPTION_END_TOKEN)[-1]
             opt_end_idx = len(all_ids) - 1
             for idx in range(len(all_ids) - 1, len(all_ids) - len(opt_ids) - 1, -1):
                 if all_ids[idx] == opt_end_token_id:
@@ -345,6 +441,7 @@ class RhenPacker:
         latent_tensors: Optional[Dict[str, torch.Tensor]] = None,
         device: Optional[torch.device] = None,
         allow_latent_slots: bool = False,
+        isolate_branch_options: Optional[bool] = None,
     ) -> PackedRhenSequence:
         """
         Internal sequence packing engine for shared state (or delta) and parallel decision branches.
@@ -391,12 +488,36 @@ class RhenPacker:
 
         # 3. Create Attention Mask using Rhen2DBranchMask
         from rhen.optim.rhen_mask import Rhen2DBranchMask
-        attn_mask = Rhen2DBranchMask.create_mask(
-            state_length=state_len,
-            branch_lengths=branch_lengths,
-            device=device,
-            dtype=torch.float32,
+        use_isolate = (
+            self.isolate_branch_options
+            if isolate_branch_options is None
+            else bool(isolate_branch_options)
         )
+        position_ids: Optional[torch.Tensor] = None
+        if use_isolate:
+            branch_option_spans = extract_branch_option_spans(branch_metas)
+            attn_mask = Rhen2DBranchMask.create_mask(
+                state_length=state_len,
+                branch_lengths=branch_lengths,
+                device=device,
+                dtype=torch.float32,
+                branch_option_spans=branch_option_spans,
+                isolate_options=True,
+            )
+            position_ids = build_isolated_position_ids(
+                state_length=state_len,
+                branch_lengths=branch_lengths,
+                branch_option_spans=branch_option_spans,
+                total_len=len(all_ids),
+                device=device,
+            )
+        else:
+            attn_mask = Rhen2DBranchMask.create_mask(
+                state_length=state_len,
+                branch_lengths=branch_lengths,
+                device=device,
+                dtype=torch.float32,
+            )
 
         # Locate latent slot token indices if present
         latent_slot_id = getattr(self.tokenizer, "latent_slot_token_id", None)
@@ -442,6 +563,7 @@ class RhenPacker:
             latent_tensors=latent_tensors,
             latent_slot_indices=latent_slot_indices,
             is_speculative_tree=False,
+            position_ids=position_ids,
         )
 
     def pack(
@@ -452,6 +574,7 @@ class RhenPacker:
         device: Optional[torch.device] = None,
         questions: Optional[List[Any]] = None,
         allow_latent_slots: Optional[bool] = None,
+        isolate_branch_options: Optional[bool] = None,
         **kwargs: Any,
     ) -> PackedRhenSequence:
         """
@@ -517,6 +640,7 @@ class RhenPacker:
             latent_tensors=latent_tensors,
             device=device,
             allow_latent_slots=allow_latent_slots,
+            isolate_branch_options=isolate_branch_options,
         )
 
         # Placeholders in the text (which may come from untrusted content) must match the
@@ -545,6 +669,7 @@ class RhenPacker:
         questions: List[Any],
         latent_tensors: Optional[Dict[str, torch.Tensor]] = None,
         device: Optional[torch.device] = None,
+        isolate_branch_options: Optional[bool] = None,
     ) -> PackedRhenSequence:
         """
         Packs a state delta against a base state using <|state_diff|> delta encoding.
@@ -594,6 +719,7 @@ class RhenPacker:
             latent_tensors=latent_tensors,
             device=device,
             allow_latent_slots=allow_latent_slots,
+            isolate_branch_options=isolate_branch_options,
         )
 
     def build_speculative_tree_pack(
@@ -828,9 +954,18 @@ class RhenPacker:
 # Global default packer singleton
 _GLOBAL_PACKER: Optional[RhenPacker] = None
 
-def get_rhen_packer(tokenizer=None) -> RhenPacker:
-    """Returns singleton RhenPacker instance."""
+def get_rhen_packer(
+    tokenizer=None,
+    isolate_branch_options: Optional[bool] = None,
+) -> RhenPacker:
+    """Returns a RhenPacker instance.
+
+    When ``isolate_branch_options`` is explicitly specified, returns a packer configured
+    with that flag without clobbering the process-level default singleton.
+    """
     global _GLOBAL_PACKER
-    if _GLOBAL_PACKER is None or tokenizer is not None:
+    if isolate_branch_options is not None:
+        return RhenPacker(tokenizer=tokenizer, isolate_branch_options=bool(isolate_branch_options))
+    if _GLOBAL_PACKER is None or (tokenizer is not None and _GLOBAL_PACKER.tokenizer is not tokenizer):
         _GLOBAL_PACKER = RhenPacker(tokenizer=tokenizer)
     return _GLOBAL_PACKER

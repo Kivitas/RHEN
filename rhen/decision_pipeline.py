@@ -280,15 +280,18 @@ def _build_features(
     histories: Mapping[str, List[float]],
     thresholds: Mapping[str, float],
 ) -> Dict[str, Any]:
-    """Features the policy reads. Breach figures are bounds, not point probabilities.
+    """Features the policy reads. Breach figures include bounds and a Gaussian-copula estimate.
 
-    Per series: ``breach_prob_step_max_lower`` (max single-step probability) and
-    ``breach_prob_any_step_upper`` (union bound, capped at 1). Top level: the same two bounds
-    computed over every thresholded series and step together, so the upper bound covers any
-    breach of any series. The risk tier is gated on ``breach_prob_any_step_upper``.
+    Per series: ``breach_prob_step_max_lower`` (max single-step probability),
+    ``breach_prob_any_step_upper`` (union bound, capped at 1), and ``breach_prob_copula``
+    (stationary AR(1) Gaussian-copula estimate clamped within those bounds). Top level:
+    the same figures aggregated across every thresholded series and step together, so the
+    upper bound covers any breach of any series. The risk tier is gated on
+    ``breach_prob_any_step_upper``.
     """
     per_series: Dict[str, Dict[str, Any]] = {}
     all_step_probs: List[float] = []
+    series_copula_probs: List[float] = []
     uncertainties: List[float] = []
     for name, fc in forecasts.items():
         last = histories[name][-1]
@@ -305,24 +308,42 @@ def _build_features(
             "threshold": None,
             "breach_prob_step_max_lower": None,
             "breach_prob_any_step_upper": None,
+            "breach_prob_copula": None,
         }
         if name in thresholds:
-            step_probs = fc.step_exceedance_probs(thresholds[name])
+            thr = thresholds[name]
+            step_probs = fc.step_exceedance_probs(thr)
             series_lower, series_upper = _breach_bounds(step_probs)
-            entry["threshold"] = thresholds[name]
+            series_copula = fc.copula_breach_prob(thr) if fc.quantiles is not None else None
+            entry["threshold"] = thr
             entry["breach_prob_step_max_lower"] = series_lower
             entry["breach_prob_any_step_upper"] = series_upper
+            entry["breach_prob_copula"] = series_copula
             all_step_probs.extend(step_probs)
+            if series_copula is not None:
+                series_copula_probs.append(series_copula)
         per_series[name] = entry
         uncertainties.append(uncertainty)
     if all_step_probs:
         overall_lower, overall_upper = _breach_bounds(all_step_probs)
     else:
         overall_lower = overall_upper = None
+    if series_copula_probs and overall_lower is not None and overall_upper is not None:
+        if len(series_copula_probs) == 1:
+            overall_copula = series_copula_probs[0]
+        else:
+            no_breach = 1.0
+            for p in series_copula_probs:
+                no_breach *= 1.0 - p
+            overall_copula = 1.0 - no_breach
+        overall_copula = float(min(overall_upper, max(overall_lower, overall_copula)))
+    else:
+        overall_copula = None
     return {
         "series": per_series,
         "breach_prob_step_max_lower": overall_lower,
         "breach_prob_any_step_upper": overall_upper,
+        "breach_prob_copula": overall_copula,
         "uncertainty": max(uncertainties),
     }
 

@@ -37,6 +37,7 @@ from rhen.research import distributed as distmod
 from rhen.research.data import (
     DecisionExample,
     TokenWindows,
+    collate_packed_sequences,
     lm_inputs,
     load_decision_jsonl,
     read_meta,
@@ -179,29 +180,122 @@ class TrainingModule(nn.Module):
             return self._decision_loss(*payload)
         raise ValueError(f"unknown objective {kind!r}")
 
+    @staticmethod
+    def _layout_key(packed: Any, idx: int) -> Tuple[Any, ...]:
+        if getattr(packed, "latent_tensors", None) is not None or getattr(packed, "is_speculative_tree", False):
+            return ("unique", idx)
+        return (
+            int(packed.input_ids.shape[-1]),
+            int(packed.state_length),
+            tuple(int(b) for b in packed.branch_lengths),
+            tuple(
+                (
+                    int(b.decide_idx),
+                    tuple(int(x) for x in (getattr(b, "option_start_indices", None) or ())),
+                    tuple(int(x) for x in b.option_end_indices),
+                    str(getattr(b, "primitive_type", "choice")),
+                    tuple(sorted((getattr(b, "metadata", None) or {}).items())),
+                )
+                for b in packed.branches
+            ),
+        )
+
+    @staticmethod
+    def _slice_batched_rhen_results(batched_results: List[Dict[str, Any]], batch_idx: int) -> List[Dict[str, Any]]:
+        sliced: List[Dict[str, Any]] = []
+        tensor_keys = (
+            "probs_tensor",
+            "logits_tensor",
+            "scores_tensor",
+            "temperature_tensor",
+            "alpha_tensor",
+            "beta_tensor",
+            "start_logits",
+            "end_logits",
+            "schema_logits",
+            "kv_state_latent",
+        )
+        list_tensor_keys = ("q_layers", "opt_layers")
+        for res in batched_results:
+            item = dict(res)
+            for k in tensor_keys:
+                val = res.get(k, None)
+                if isinstance(val, torch.Tensor) and val.shape[0] > batch_idx:
+                    item[k] = val[batch_idx : batch_idx + 1]
+            for k in list_tensor_keys:
+                val = res.get(k, None)
+                if isinstance(val, list):
+                    item[k] = [
+                        t[batch_idx : batch_idx + 1] if (isinstance(t, torch.Tensor) and t.shape[0] > batch_idx) else t
+                        for t in val
+                    ]
+            if isinstance(item.get("probs_tensor", None), torch.Tensor):
+                p0 = item["probs_tensor"][0]
+                item["probabilities"] = p0.detach().cpu().tolist()
+                if item.get("primitive") != "multichoice" and p0.numel() > 0:
+                    chosen = int(torch.argmax(p0).item())
+                    item["chosen_index"] = chosen
+                    opts = item.get("options") or []
+                    item["chosen_option"] = opts[chosen] if chosen < len(opts) else None
+            if isinstance(item.get("scores_tensor", None), torch.Tensor):
+                item["scores"] = item["scores_tensor"][0].detach().cpu().tolist()
+            if isinstance(item.get("temperature_tensor", None), torch.Tensor):
+                item["temperature"] = float(item["temperature_tensor"][0].item())
+            sliced.append(item)
+        return sliced
+
     def _decision_loss(self, examples: Sequence[DecisionExample], generator: torch.Generator):
         from rhen_loss import compute_option_order_consistency_loss, compute_rhen_multi_task_loss
 
         core = distmod.unwrap(self.model)
         device = next(core.parameters()).device
-        total = torch.zeros((), device=device)
         stats = {"decision_loss": 0.0, "order_consistency": 0.0}
-        for ex in examples:
-            items = [q.packer_item() for q in ex.questions]
-            packed = self.packer.pack(state=ex.state, questions_and_options=items)
-            results = core.forward_rhen(packed, num_loops=self.decision_num_loops)
+        if not examples:
+            return torch.zeros((), device=device), stats
+
+        n_examples = len(examples)
+        items_per_example = [[q.packer_item() for q in ex.questions] for ex in examples]
+        packed_list = [
+            self.packer.pack(state=ex.state, questions_and_options=items)
+            for ex, items in zip(examples, items_per_example)
+        ]
+
+        # Group examples that share identical sequence length and branch layout for batched forward_rhen.
+        groups: Dict[Tuple[Any, ...], List[int]] = {}
+        for idx, packed in enumerate(packed_list):
+            key = self._layout_key(packed, idx)
+            groups.setdefault(key, []).append(idx)
+
+        results_per_example: List[Optional[List[Dict[str, Any]]]] = [None] * n_examples
+        for group_indices in groups.values():
+            if len(group_indices) == 1:
+                i = group_indices[0]
+                results_per_example[i] = core.forward_rhen(packed_list[i], num_loops=self.decision_num_loops)
+            else:
+                batched_pack = collate_packed_sequences([packed_list[i] for i in group_indices])
+                batched_res = core.forward_rhen(batched_pack, num_loops=self.decision_num_loops)
+                for g, i in enumerate(group_indices):
+                    results_per_example[i] = self._slice_batched_rhen_results(batched_res, g)
+
+        losses: List[torch.Tensor] = []
+        for idx, ex in enumerate(examples):
+            packed = packed_list[idx]
+            items = items_per_example[idx]
+            results = results_per_example[idx]
             loss, _ = compute_rhen_multi_task_loss(
                 core, packed, [q.label for q in ex.questions], device, precomputed_results=results
             )
-            stats["decision_loss"] += float(loss.detach()) / len(examples)
+            stats["decision_loss"] += float(loss.detach()) / n_examples
             if self.order_consistency_coef > 0.0:
                 consistency, _ = compute_option_order_consistency_loss(
                     core, ex.state, items, original_results=results, generator=generator,
                     tokenizer=self.tokenizer, num_loops=self.decision_num_loops,
                 )
                 loss = loss + self.order_consistency_coef * consistency
-                stats["order_consistency"] += float(consistency.detach()) / len(examples)
-            total = total + loss / len(examples)
+                stats["order_consistency"] += float(consistency.detach()) / n_examples
+            losses.append(loss)
+
+        total = torch.stack(losses).mean()
         return total, stats
 
 
