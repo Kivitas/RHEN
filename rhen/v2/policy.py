@@ -268,6 +268,24 @@ def cascade_confidence(stage_confidences: Sequence[float],
     return CascadeReport(float(whole_workflow_calibration(prod)), "calibrated_joint", stages)
 
 
+# ---------------------------------------------------------------------------- forecast hook (plan 9.5)
+
+
+def forecast_cost_fn(base_cost_wrong: float = 1.0,
+                     cost_abstain: Optional[float] = None) -> Callable[[Mapping[str, Any]], CostSpec]:
+    """Default ``cost_fn`` for forecast-aware decisions: ``cost_wrong = base * (1 + breach_prob_any_step_upper)``.
+
+    ``features`` is the forecast feature dict of ``rhen.decision_pipeline`` (a missing or None upper bound counts as
+    0).  A wider breach risk makes a wrong action dearer, so the policy needs a higher calibrated confidence to act
+    instead of applying a separate hard uncertainty threshold.  ``cost_abstain`` None keeps the tier default.
+    """
+    def fn(features: Mapping[str, Any]) -> CostSpec:
+        upper = features.get("breach_prob_any_step_upper")
+        upper = 0.0 if upper is None else min(max(float(upper), 0.0), 1.0)
+        return CostSpec(cost_wrong=float(base_cost_wrong) * (1.0 + upper), cost_abstain=cost_abstain)
+    return fn
+
+
 # ---------------------------------------------------------------------------- v1 migration
 
 
@@ -302,5 +320,5 @@ def from_v1_policy(policy: DecisionPolicy, cost_wrong: float = 1.0) -> Tuple[Dec
 
 __all__ = [
     "CostSpec", "DecisionPolicy2", "PolicyOutcome2", "PolicyStatus", "CascadeReport", "cascade_confidence",
-    "anchor_to_confidence", "LegacyDecisionPolicy", "from_v1_policy", "TIER_TOLERANCE", "TIERS", "NULL",
+    "anchor_to_confidence", "forecast_cost_fn", "LegacyDecisionPolicy", "from_v1_policy", "TIER_TOLERANCE", "TIERS", "NULL",
 ]

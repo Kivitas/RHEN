@@ -35,7 +35,7 @@ import time
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -312,15 +312,24 @@ class DecisionPipeline:
     # ------------------------------------------------------------------ public API
     def decide(self, state: Any, questions: Sequence[QuestionSpec], *, effort: str = "medium", risk_tier: str = "low",
                costs: Any = None, constraints: Optional[Sequence[Tuple[str, Callable]]] = None,
-               approval: Union[None, bool, Sequence[str]] = None) -> PipelineResult:
+               approval: Union[None, bool, Sequence[str]] = None,
+               cost_fn: Optional[Callable[[Mapping[str, Any]], CostSpec]] = None,
+               features: Optional[Mapping[str, Any]] = None) -> PipelineResult:
+        """``cost_fn(features) -> CostSpec`` (plan 9.5) supplies the cost of every question whose ``costs`` entry
+        is None; ``features`` (caller data such as forecast breach bounds) is merged into the features that the
+        hook and the constraints see.  Without ``cost_fn`` nothing changes."""
         return self.decide_batch([(state, questions)], effort=effort, risk_tier=risk_tier,
-                                 costs=[costs], constraints=constraints, approval=approval)[0]
+                                 costs=[costs], constraints=constraints, approval=approval,
+                                 cost_fn=cost_fn, features=[features])[0]
 
     def decide_batch(self, items: Sequence[Tuple[Any, Sequence[QuestionSpec]]], *, effort: str = "medium",
                      risk_tier: str = "low", costs: Optional[Sequence[Any]] = None,
                      constraints: Optional[Sequence[Tuple[str, Callable]]] = None,
-                     approval: Union[None, bool, Sequence[str]] = None) -> List[PipelineResult]:
-        """``costs`` is aligned with ``items``; each entry is None, one CostSpec, or one per question."""
+                     approval: Union[None, bool, Sequence[str]] = None,
+                     cost_fn: Optional[Callable[[Mapping[str, Any]], CostSpec]] = None,
+                     features: Optional[Sequence[Optional[Mapping[str, Any]]]] = None) -> List[PipelineResult]:
+        """``costs`` is aligned with ``items``; each entry is None, one CostSpec, or one per question.
+        ``features`` is aligned with ``items`` too; ``cost_fn`` is described on ``decide``."""
         cfg = self.model.cfg
         n_items = len(items)
         if n_items == 0:
@@ -352,6 +361,9 @@ class DecisionPipeline:
         costs_in = list(costs) if costs is not None else [None] * n_items
         if len(costs_in) != n_items:
             raise ValueError("costs must have one entry per item")
+        item_feats: List[Mapping[str, Any]] = [dict(f) if f else {} for f in (features or [None] * n_items)]
+        if len(item_feats) != n_items:
+            raise ValueError("features must have one entry per item")
         slots: List[_Slot] = []
         item_costs: List[List[Optional[CostSpec]]] = []
         for i, qs in enumerate(qlists):
@@ -373,6 +385,12 @@ class DecisionPipeline:
                     raise ValueError("options must be unique")
                 k = 2 if q.type == "noul" else len(q.options)
                 slots.append(_Slot(i, j, q, routed, q.type, k))
+                if cost_fn is not None and per_q[j] is None:
+                    hook = cost_fn({**item_feats[i], "risk_tier": risk_tier, "qtype": q.type, "question_index": j,
+                                    "item": i})
+                    if not isinstance(hook, CostSpec):
+                        raise TypeError("cost_fn must return a CostSpec")
+                    per_q[j] = hook
         rec("PLAN", t0, [{"effort": eff, "risk_tier": risk_tier, "n_questions": len(qlists[i]),
                           "routed": sum(1 for s in slots if s.item == i and s.routed)} for i in range(n_items)])
 
@@ -518,7 +536,8 @@ class DecisionPipeline:
                 qd = QuestionDecision(did, s.item, s.index, s.spec, None, outcome, False, s.routed, error=err)
             else:
                 eff_cal = bool(cd.calibrated) and cal_ok and not s.routed and not self._group_alarmed(s.qtype, s.k)
-                outcome = self._policy(s, cd, risk_tier, eff_cal, item_costs[s.item][s.index], constraints, approval)
+                outcome = self._policy(s, cd, risk_tier, eff_cal, item_costs[s.item][s.index], constraints, approval,
+                                       item_feats[s.item])
                 if cal_reason != "ok":
                     outcome.reasons.append(f"calibration: {cal_reason}")
                 if self.calibration is not None and cal_reason == "ok" and not cal_ok:
@@ -604,7 +623,7 @@ class DecisionPipeline:
 
     # ------------------------------------------------------------------ policy / staging helpers
     def _policy(self, s: _Slot, cd: CheckedDecision, tier: str, calibrated: bool, costs: Optional[CostSpec],
-                constraints, approval) -> PolicyOutcome2:
+                constraints, approval, extra: Optional[Mapping[str, Any]] = None) -> PolicyOutcome2:
         conf = float(min(max(cd.confidence, 0.0), 1.0))
         if s.qtype in ("choice", "noul", "score") and cd.answer is not None:
             top = ("true" if cd.answer else "false") if s.qtype == "noul" else str(cd.answer)
@@ -614,8 +633,9 @@ class DecisionPipeline:
         else:
             top = str(cd.answer) if cd.answer is not None else "__answer__"
             probs = {top: conf, NULL: 1.0 - conf}
-        feats = {"risk_tier": tier, "qtype": s.qtype, "question_index": s.index, "item": s.item,
-                 "flags": list(cd.flags)}
+        feats = dict(extra or {})
+        feats.update({"risk_tier": tier, "qtype": s.qtype, "question_index": s.index, "item": s.item,
+                      "flags": list(cd.flags)})
         return self.policy.evaluate(probs, verdict=cd.verdict, risk_tier=tier, calibrated=calibrated, costs=costs,
                                     constraints=constraints or (), features=feats, p_correct=conf, top_label=top,
                                     approval=approval)

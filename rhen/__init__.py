@@ -156,6 +156,25 @@ from .decision_pipeline import (
     FeedbackLedger,
 )
 
+# 14. RHEN-2 (lazy: nothing under rhen.v2 is imported until one of these names is used).
+# Deliberately not in __all__, so ``from rhen import *`` does not load the v2 modules.
+_V2_LAZY = ("DecisionPipeline", "Rhen2Model", "Rhen2Config", "V2Backend")
+
+
+def __getattr__(name):
+    if name in _V2_LAZY:
+        import importlib
+
+        value = getattr(importlib.import_module("rhen.v2"), name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_V2_LAZY))
+
+
 __all__ = [
     "Noul", "NoulResult",
     "Choice", "ChoiceResult",

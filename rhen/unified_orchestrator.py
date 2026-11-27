@@ -18,14 +18,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import torch
 
 try:
-    from rhen.rhen import AdvancedRhenEngine
+    from rhen.rhen import AdvancedRhenEngine, RhenEngine
     from rhen.config import EOSConfig
     from rhen.meta_cognitive_monitor import MetaCognitiveMonitor
     from rhen.agent_tools import ActionCard, ActionStagingEngine
     from rhen.context_builder import ContextBuilder
     from rhen.rhen_pillars import PillarStack, RhenPillarConfig
 except ImportError:
-    from rhen import AdvancedRhenEngine
+    from rhen import AdvancedRhenEngine, RhenEngine
     from config import EOSConfig
     from meta_cognitive_monitor import MetaCognitiveMonitor
     from agent_tools import ActionCard, ActionStagingEngine
@@ -45,21 +45,41 @@ class UnifiedAIOrchestrator:
 
     def __init__(
         self,
-        config: EOSConfig,
+        config: Optional[EOSConfig],
         pillars: Optional[RhenPillarConfig] = None,
         action_signing_key: Optional[Union[bytes, str]] = None,
+        *,
+        backend: str = "v1",
+        v2_checkpoint: Optional[str] = None,
+        v2_calibration: Optional[str] = None,
+        v2_backend: Optional[Any] = None,
     ):
         """
         Args:
-            config: Model and runtime configuration.
+            config: Model and runtime configuration (the meta-cognitive monitor's; may be None with backend='v2').
             pillars: Optional Rhen-1.0 pillar configuration (all inert by default).
             action_signing_key: Key that signs Action Cards. When omitted, the staging
                 engine generates an ephemeral key for this orchestrator.
+            backend: 'v1' (default, unchanged) or 'v2'. With 'v2' the typed primitives are decided by the
+                RHEN-2 ``DecisionPipeline`` (``v2_checkpoint`` / ``v2_calibration`` paths, or a ready
+                ``rhen.v2.compat.V2Backend`` as ``v2_backend``). Staging, Merkle ledger, pillars and the
+                meta-cognitive monitor behave as in v1; the pipeline's own audit hook is the pillar audit
+                ledger when that pillar is enabled. Speculative cascades are v1 only.
         """
+        if backend not in ("v1", "v2"):
+            raise ValueError(f"Unknown backend {backend!r}; expected 'v1' or 'v2'")
+        self.backend = backend
+        if backend == "v2" and config is None:
+            config = EOSConfig()
         self.config = config
 
         # The single Rhen decision layer.
-        self.semantic_engine = AdvancedRhenEngine(config=config)
+        if backend == "v2":
+            self.semantic_engine = RhenEngine(
+                backend="v2", v2_checkpoint=v2_checkpoint, v2_calibration=v2_calibration, v2_backend=v2_backend
+            )
+        else:
+            self.semantic_engine = AdvancedRhenEngine(config=config)
 
         # Meta-cognitive monitor (calibration, ECE, Platt scaling, uncertainty decomposition)
         self.meta_cognitive = MetaCognitiveMonitor(config)
@@ -79,6 +99,10 @@ class UnifiedAIOrchestrator:
         # gates, search-before-RL). All pillars default to inert, so constructing
         # an orchestrator behaves exactly as before unless one is enabled.
         self.pillars = PillarStack(pillars)
+        if backend == "v2":
+            pipe = self.semantic_engine._v2.pipeline
+            if pipe.audit is None and getattr(self.pillars, "audit", None) is not None:
+                pipe.audit = self.pillars.audit
 
     # -------------------------------------------------------------------------
     # Context Construction
@@ -131,6 +155,15 @@ class UnifiedAIOrchestrator:
             "staged_actions": [],
         }
 
+        engine_kwargs: Dict[str, Any] = {}
+        if self.backend == "v2":
+            if speculative_branches is not None:
+                raise NotImplementedError("speculative cascades are not available on the v2 backend")
+            for k in ("risk_tier", "costs", "constraints", "approval", "effort"):
+                if k in kwargs and kwargs[k] is not None:
+                    engine_kwargs[k] = kwargs[k]
+            result["backend"] = "v2"
+
         # Speculative Cascade Mode (if speculative_branches is provided)
         if speculative_branches is not None:
             if not questions:
@@ -156,7 +189,11 @@ class UnifiedAIOrchestrator:
 
         # Decision Mode (typed primitives through the single Rhen decision layer)
         elif questions is not None:
-            result.update(await self._decision_mode(state, questions, latent_tensors=latent_tensors))
+            if engine_kwargs:
+                result.update(await self._decision_mode(
+                    state, questions, latent_tensors=latent_tensors, engine_kwargs=engine_kwargs))
+            else:
+                result.update(await self._decision_mode(state, questions, latent_tensors=latent_tensors))
 
         else:
             raise ValueError("unified_decide needs questions or speculative_branches")
@@ -285,9 +322,13 @@ class UnifiedAIOrchestrator:
         state: Any,
         questions: List,
         latent_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        engine_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Evaluate typed primitives on the single Rhen decision layer, then monitor them."""
-        results = self.semantic_engine.evaluate(state, questions, latent_tensors=latent_tensors)
+        if engine_kwargs:
+            results = self.semantic_engine.evaluate(state, questions, latent_tensors=latent_tensors, **engine_kwargs)
+        else:
+            results = self.semantic_engine.evaluate(state, questions, latent_tensors=latent_tensors)
         decision: Dict[str, Any] = {
             "mode": "decision",
             "results": results,

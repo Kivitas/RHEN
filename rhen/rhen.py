@@ -1131,7 +1131,19 @@ class RhenEngine:
         tokenizer=None,
         device: Optional[torch.device] = None,
         effort: Optional[str] = None,
+        *,
+        backend: str = "v1",
+        v2_checkpoint: Optional[str] = None,
+        v2_calibration: Optional[str] = None,
+        v2_backend: Optional[Any] = None,
     ):
+        if backend not in ("v1", "v2"):
+            raise ValueError(f"Unknown backend {backend!r}; expected 'v1' or 'v2'")
+        self.backend = backend
+        self._v2 = None
+        if backend == "v1" and (v2_checkpoint is not None or v2_calibration is not None or v2_backend is not None):
+            raise ValueError("v2_checkpoint, v2_calibration and v2_backend need backend='v2'")
+
         if isinstance(config, torch.nn.Module):
             if model is not None and tokenizer is None:
                 tokenizer = model
@@ -1145,6 +1157,23 @@ class RhenEngine:
                 raise ValueError(
                     f"Unknown effort level {effort!r}; expected one of ('low', 'medium', 'high')"
                 )
+
+        if backend == "v2":
+            # Primitive methods delegate to rhen.v2.compat.V2Backend (RHEN-2 DecisionPipeline); the v1 model,
+            # packer and conformal/OOD helpers are not built. v1 latent-search methods are unavailable.
+            from rhen.v2.compat import V2Backend
+
+            self._v2 = v2_backend if v2_backend is not None else V2Backend.from_checkpoint(
+                v2_checkpoint, v2_calibration, **({"effort": effort_norm} if effort_norm else {}))
+            self.model = self._v2.model
+            self.tokenizer = self._v2.packer.tok
+            self.device = device or torch.device("cpu")
+            self.effort = effort_norm or self._v2.effort
+            self.packer = None
+            self.conformal_engine = None
+            self.ood_detector = None
+            self.abstention_gate = GeometricAbstentionGate()
+            return
 
         if model is None:
             if config is None:
@@ -1200,6 +1229,14 @@ class RhenEngine:
         device = kwargs.pop("device", None)
         model = kwargs.pop("model", None)
         config = kwargs.pop("config", None)
+        backend = kwargs.pop("backend", "v1")
+        if backend != "v1":
+            return cls(
+                effort=effort, backend=backend, device=device, tokenizer=tokenizer,
+                v2_checkpoint=kwargs.pop("v2_checkpoint", None),
+                v2_calibration=kwargs.pop("v2_calibration", None),
+                v2_backend=kwargs.pop("v2_backend", None),
+            )
         if config is None and model is None:
             try:
                 from rhen.config import EOSConfig
@@ -2192,6 +2229,11 @@ class RhenEngine:
         Returns:
             List of typed results (NoulResult, ChoiceResult, ScoreResult, MultiChoiceResult, RangeResult, ExtractResult, CascadeResult, or dict).
         """
+        if getattr(self, "backend", "v1") == "v2":
+            return self._v2.evaluate(
+                state, questions, delta_state=delta_state, is_delta=is_delta, latent_tensors=latent_tensors,
+                effort=effort, num_loops=num_loops, **kwargs,
+            )
         tuples = []
         types = []
         for q in questions:
@@ -2597,6 +2639,8 @@ class RhenEngine:
         Returns:
             List of typed results for callable stages, or CascadeResult for explicit list.
         """
+        if getattr(self, "backend", "v1") == "v2":
+            return self._v2.cascade(state, stages)
         if isinstance(stages, Cascade):
             return self._evaluate_cascade(stages, state)
 
@@ -2846,6 +2890,7 @@ RhenEngine.decide = RhenEngine.evaluate
 # --------------------------------------------------------------------------------------
 
 _DEFAULT_ENGINE: Optional[RhenEngine] = None
+_DEFAULT_V2_ENGINES: Dict[Tuple[Optional[str], Optional[str]], RhenEngine] = {}
 
 
 class RhenAbstentionError(RuntimeError):
@@ -2856,9 +2901,22 @@ class RhenAbstentionError(RuntimeError):
         self.result = result
 
 
-def get_default_engine() -> RhenEngine:
-    """Return process-level cached default RhenEngine instance."""
+def get_default_engine(
+    backend: str = "v1",
+    v2_checkpoint: Optional[str] = None,
+    v2_calibration: Optional[str] = None,
+) -> RhenEngine:
+    """Return process-level cached default RhenEngine instance (v2 engines are cached per checkpoint pair)."""
     global _DEFAULT_ENGINE
+    if backend == "v2":
+        key = (v2_checkpoint, v2_calibration)
+        if key not in _DEFAULT_V2_ENGINES:
+            _DEFAULT_V2_ENGINES[key] = RhenEngine(
+                backend="v2", v2_checkpoint=v2_checkpoint, v2_calibration=v2_calibration
+            )
+        return _DEFAULT_V2_ENGINES[key]
+    if backend != "v1":
+        raise ValueError(f"Unknown backend {backend!r}; expected 'v1' or 'v2'")
     if _DEFAULT_ENGINE is None:
         _DEFAULT_ENGINE = RhenEngine()
     return _DEFAULT_ENGINE
@@ -2868,6 +2926,7 @@ def reset_default_engine() -> None:
     """Reset the process-level cached default RhenEngine instance."""
     global _DEFAULT_ENGINE
     _DEFAULT_ENGINE = None
+    _DEFAULT_V2_ENGINES.clear()
 
 
 def decide(
@@ -2877,6 +2936,9 @@ def decide(
     engine: Optional[RhenEngine] = None,
     effort: Optional[str] = None,
     num_loops: Optional[int] = None,
+    backend: Optional[str] = None,
+    v2_checkpoint: Optional[str] = None,
+    v2_calibration: Optional[str] = None,
     **kwargs: Any,
 ) -> Any:
     """
@@ -2891,6 +2953,9 @@ def decide(
                     - 'raise': Raise RhenAbstentionError if decision is abstained.
                     - 'verdict': Return the AbstentionVerdict object on abstention.
         engine: Optional explicit RhenEngine instance. If None, uses process-level cached default engine.
+        backend: None or 'v1' keeps the v1 behaviour. 'v2' decides through the RHEN-2 pipeline: with no ``engine``
+                the process-level v2 engine for (``v2_checkpoint``, ``v2_calibration``) is used; an explicit
+                ``engine`` must itself be a v2 engine.
         **kwargs: Additional parameters passed to engine.evaluate.
 
     Returns:
@@ -2939,7 +3004,14 @@ def decide(
     else:
         normalized_state = state
 
-    eng = engine if engine is not None else get_default_engine()
+    if backend not in (None, "v1", "v2"):
+        raise ValueError(f"Unknown backend {backend!r}; expected 'v1' or 'v2'")
+    if backend == "v2":
+        eng = engine if engine is not None else get_default_engine("v2", v2_checkpoint, v2_calibration)
+        if getattr(eng, "backend", "v1") != "v2":
+            raise ValueError("backend='v2' needs a v2 engine; build it with RhenEngine(backend='v2')")
+    else:
+        eng = engine if engine is not None else get_default_engine()
     results = eng.evaluate(normalized_state, q_list, effort=effort, num_loops=num_loops, **kwargs)
 
     processed = []

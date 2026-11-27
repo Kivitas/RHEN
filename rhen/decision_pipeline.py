@@ -450,6 +450,11 @@ class ForecastAwareDecider:
         policy: A ``DecisionPolicy``. The default uses a constant utility of 1.0, which ranks
             options by engine probability alone. Set a real utility for real use.
         ledger: Optional ``FeedbackLedger``. Decisions are recorded in it when given.
+        backend: 'v1' (default) or 'v2'. With 'v2' the decider still forecasts and augments the state text, but
+            decides through the RHEN-2 pipeline (``pipeline``: a ``DecisionPipeline`` or ``V2Backend``; or
+            ``engine`` is a ``RhenEngine(backend='v2')``), and forecast uncertainty enters the cost
+            specification through ``cost_fn(features) -> CostSpec`` (plan 9.5) instead of the hard
+            ``max_forecast_uncertainty`` gate, which stays for v1.
 
     Approvals are kept in a private registry on this decider, keyed by decision_id, and written
     only by ``approve``. ``execute`` gates NEEDS_APPROVAL decisions on that registry alone. Setting
@@ -463,13 +468,85 @@ class ForecastAwareDecider:
         forecaster: Forecaster,
         policy: Optional[DecisionPolicy] = None,
         ledger: Optional["FeedbackLedger"] = None,
+        *,
+        backend: str = "v1",
+        pipeline: Any = None,
+        cost_fn: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+        effort: Optional[str] = None,
     ) -> None:
+        if backend not in ("v1", "v2"):
+            raise ValueError(f"Unknown backend {backend!r}; expected 'v1' or 'v2'")
+        self.backend = backend
         self.engine = engine
         self.forecaster = forecaster
         self.policy = policy if policy is not None else DecisionPolicy(utility=_unit_utility)
         self.ledger = ledger
+        self._v2: Any = None
+        self.cost_fn = cost_fn
+        self.effort = effort
+        if backend == "v2":
+            self._v2 = self._resolve_v2(engine, pipeline)
+            if self.cost_fn is None:
+                from rhen.v2.policy import forecast_cost_fn
+
+                self.cost_fn = forecast_cost_fn()
+        elif pipeline is not None or cost_fn is not None:
+            raise ValueError("pipeline and cost_fn need backend='v2'")
         self._decisions: Dict[str, FutureAwareDecision] = {}
         self._approvals: Dict[str, Dict[str, str]] = {}
+
+    @staticmethod
+    def _resolve_v2(engine: Any, pipeline: Any) -> Any:
+        """A ``V2Backend`` from ``pipeline`` (DecisionPipeline or V2Backend) or from a v2 ``engine``."""
+        from rhen.v2.compat import V2Backend
+        from rhen.v2.pipeline import DecisionPipeline
+
+        for cand in (pipeline, engine):
+            if isinstance(cand, V2Backend):
+                return cand
+            if isinstance(cand, DecisionPipeline):
+                return V2Backend(cand)
+            inner = getattr(cand, "_v2", None)
+            if isinstance(inner, V2Backend):
+                return inner
+        raise ValueError("backend='v2' needs a DecisionPipeline, V2Backend or RhenEngine(backend='v2') "
+                         "as `pipeline` or `engine`")
+
+    def _decide_v2(
+        self, augmented: str, question: str, option_list: List[str], features: Dict[str, Any]
+    ) -> Tuple[Any, PolicyOutcome]:
+        """Decide through the v2 pipeline (plan 9.5).
+
+        The risk tier comes from the v1 policy's tier rule (``tier_fn`` or the breach upper-bound cutoffs).
+        Forecast uncertainty reaches the decision through ``cost_fn(features) -> CostSpec`` (default
+        ``cost_wrong * (1 + breach_prob_any_step_upper)``), not through ``max_forecast_uncertainty`` or
+        ``min_confidence``, which only apply to backend='v1'. Constraints and approval tiers carry over.
+        """
+        from rhen.rhen import Choice
+
+        kwargs: Dict[str, Any] = dict(
+            constraints=list(self.policy.constraints),
+            approval=list(self.policy.approval_required_tiers),
+            cost_fn=self.cost_fn,
+            features=features,
+            effort=self.effort,
+        )
+        q = [Choice(question=question, options=option_list)]
+        if self.policy.tier_fn is None:
+            tier, tier_reason = self.policy.risk_tier("", features)
+            results, pres = self._v2.evaluate_detailed(augmented, q, risk_tier=tier, **kwargs)
+        else:
+            results, pres = self._v2.evaluate_detailed(augmented, q, risk_tier="low", **kwargs)
+            tier, tier_reason = self.policy.risk_tier(results[0].choice_label, features)
+            if tier != "low":
+                results, pres = self._v2.evaluate_detailed(augmented, q, risk_tier=tier, **kwargs)
+        choice = results[0]
+        qd = pres.decisions[0]
+        features["v2"] = {"risk_tier": tier, "costs": dict(qd.outcome.costs), "decision_id": qd.decision_id,
+                          "calibrated": bool(qd.calibrated), "model_hash": pres.model_hash}
+        reasons = list(qd.outcome.reasons) + [tier_reason]
+        outcome = PolicyOutcome(qd.outcome.status, qd.outcome.option, None, reasons, tier)
+        return choice, outcome
 
     def decide(
         self,
@@ -511,8 +588,11 @@ class ForecastAwareDecider:
         features = _build_features(forecasts, histories, thresholds_map)
         augmented = _augmented_state(state, forecasts, histories, thresholds_map, method, horizon)
 
-        choice = self.engine.choice(augmented, question, option_list)
-        outcome = self.policy.evaluate(choice, features)
+        if self.backend == "v2":
+            choice, outcome = self._decide_v2(augmented, question, option_list, features)
+        else:
+            choice = self.engine.choice(augmented, question, option_list)
+            outcome = self.policy.evaluate(choice, features)
 
         decision = FutureAwareDecision(
             decision_id=f"fad-{uuid.uuid4().hex}",
