@@ -1447,6 +1447,46 @@ text above and this section differ, this section is what the code does.
 
 ---
 
+## 11.2 Implementation status (as of this branch)
+
+"Verified" means tests pass in this repository (full suite: 896 passed, 4 expected
+failures documenting v1 limits, and one failure in a CI-workflow test that also fails
+on a clean `main`). Nothing here has been trained at scale, so **no accuracy,
+calibration or latency claim is made anywhere**; the smoke runs prove plumbing only.
+
+| Task | Status | Notes |
+| :--- | :--- | :--- |
+| T-001 v1 error instead of random head | done, verified | |
+| T-002 v1 structural xfail tests | done, verified | four tests, each fails on its assertion |
+| T-003 README references | done | |
+| T-101 to T-103 config, layers, packing | done, verified | parameter counts exact |
+| T-201 to T-208 model, invariance, isolation, overfit | done, verified | option-order invariance exact to 1e-5 |
+| T-301, T-302 converters | done, verified on fixtures | 24 datasets; label names for Banking77/CLINC150/MASSIVE/FEVER and class lists must be set from the real dataset features (`set_label_names`); licences marked VERIFY |
+| T-303 synthetic tasks | done, verified | 47 families |
+| T-304 blocklist | done, verified | names only; **no real benchmark fingerprints are loaded** |
+| T-305 teacher labelling | done, verified | no provider code; dry-run only |
+| T-306 pretraining builders | done, verified | |
+| T-401 to T-403 trainer, CLI, configs | done, verified at 6 to 10 steps on r2-tiny | no real-scale run; 8B adapter stage raises NotImplementedError; FSDP path never run |
+| T-501, T-503 calibration, cross-fitting | done, verified on synthetic logits | `tau_review`, `delta_ev`, `halt_threshold` have no fitting rule |
+| T-502, T-504 Checker | done, verified | exact input masking for the critical tier not implemented; C4 does not reuse `CheapVerifier` |
+| T-601, T-602, T-604, T-605 pipeline, policy, ledger, routing | done, verified | routing-vs-flat accuracy not measured |
+| T-603 v1 wiring | done, verified | default stays v1; v1 suites unchanged |
+| T-701 to T-703 evaluation, ablations, latency | done, verified | smoke runs only, no result files |
+| Section 10.4 item 7 flat-encoder baseline | see `docs/FLAT_BASELINE_RESULTS.md` | the test of the central design claim |
+| Section 6.3 exact critical-tier C3a | not implemented | |
+| Section 7.4 `L_evidence` | not implemented | needs rationale-annotated data |
+| Section 9.5 forecast cost | implemented as a cost hook on the v2 path | |
+| T-801 to T-803 scale-up | configs only | 300M, 1B, 8B runs not executed; 8B needs the pretrained-backbone adapter |
+| T-9xx cleanup of v1 shims and duplicate trees | not started | by design, after v2 passes the gates |
+
+What remains before any claim of "comparable to JEV" can be made: real data (the
+teacher-labelled set is the largest part), the 50M gates of Section 10.3 on a
+trained model with real calibration, and the full benchmark suite with the real
+dataset files. All of that needs compute and datasets that this environment does not
+have.
+
+---
+
 ## 12. Risks and open questions
 
 1. **Data is the bottleneck.** Teacher labelling at the sizes in 7.1.4 costs
