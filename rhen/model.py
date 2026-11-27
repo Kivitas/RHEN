@@ -3335,7 +3335,11 @@ class EOSModel(PreTrainedModel):
 
         # Non-autoregressive decision extraction per branch using Hierarchical Multi-Layer Latent Fusion
         rhen_engine = self._core_block.rhen
-        pointer_head = rhen_engine.pointer_head if rhen_engine is not None else MultiHeadRhenPointerHead(self.config.hidden_size).to(device)
+        if rhen_engine is None:
+            # A freshly initialised pointer head would return random decisions without any
+            # sign that nothing was trained, so refuse instead of falling back to one.
+            raise RuntimeError("forward_rhen requires enable_rhen=True: the model has no decision head")
+        pointer_head = rhen_engine.pointer_head
 
         results = []
         state_len = packed.state_length

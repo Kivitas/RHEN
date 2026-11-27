@@ -5,9 +5,6 @@
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Code of Conduct](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
-[![arXiv 2609.30266](https://img.shields.io/badge/arXiv-2609.30266-b31b1b.svg)](https://arxiv.org/abs/2609.30266)
-[![arXiv 2609.29327](https://img.shields.io/badge/arXiv-2609.29327-b31b1b.svg)](https://arxiv.org/abs/2609.29327)
-[![arXiv 2609.28879](https://img.shields.io/badge/arXiv-2609.28879-b31b1b.svg)](https://arxiv.org/abs/2609.28879)
 
 **RHEN** is a non-autoregressive **JEV-type (Joint Evaluation)** decision engine for Autonomous Agents and Tool Orchestration. It is alpha-quality research code, not validated for production or safety-critical use; see [Known limitations](#known-limitations).
 
@@ -806,7 +803,18 @@ Key verified properties:
 - **Audit threat model.** The audit ledger does not prove that logged content is true. A compromised agent can emit new records with false content, and they will verify. A silent stop at the end of the stream is not detectable from the stored records alone. Local sealing modes hold the key inside the agent process. See [Out-of-Band Audit Trail](#out-of-band-audit-trail).
 - **Benchmark numbers are unreproduced.** The latency and proof-timing figures in this README (<15ms on GPU, <50ms on CPU, <0.1ms for Merkle proofs) are design targets. No committed benchmark output exists yet. `examples/06_latency_and_jev_comparison.py` measures decision latency on your hardware and model, but no script in the repository times Merkle proof verification.
 - **Checkpoint loading trusts the file.** `rhen/research/checkpointing.py` loads the RNG state files (`rng_rank*.pt`) with `torch.load(..., weights_only=False)`, which can execute code embedded in a crafted file. Optimizer and model files load with `weights_only=True`. Load checkpoints only from a trusted source.
+- **Known structural limits of the v1 decision path.** The state is not bidirectional in odd layers (sliding window), answers depend on question order and leak across branches through the slot channel, and option order matters unless option isolation is enabled. Four `xfail` tests in `tests/test_v1_known_structural_issues.py` document this. The `rhen.v2` package (see `docs/RHEN2_ARCHITECTURE_PLAN.md`) provides these properties by construction.
 - **Large flat configuration.** `RhenConfig` (an alias of `EOSConfig` in `rhen/config.py`) takes 128 named keyword parameters, plus `**kwargs`. Check parameter names against the source before use.
+
+---
+
+## References
+
+Third-party work this project cites (these are not RHEN's own papers):
+
+- [arXiv:2609.30266](https://arxiv.org/abs/2609.30266): agents deleting their own execution logs (out-of-band audit design).
+- [arXiv:2609.29327](https://arxiv.org/abs/2609.29327): geometric selective gate.
+- [arXiv:2609.28879](https://arxiv.org/abs/2609.28879)
 
 ---
 
