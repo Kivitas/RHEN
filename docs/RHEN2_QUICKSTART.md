@@ -158,4 +158,4 @@ python3 benchmarks/suite/run_ablations.py --steps 60 --out-dir benchmarks/suite/
 python3 benchmarks/latency/run_latency.py --preset r2-tiny --out benchmarks/latency/results.json
 ```
 
-Ablations run three seeds with a small step budget. Item 7 of plan section 10.4 (the flat-encoder baseline, which tests the central design claim) is not implemented. The suite marks results as untrained when no checkpoint is given. Do not read tiny-preset or untrained numbers as evidence about any scale.
+Ablations run three seeds with a small step budget. Item 7 of plan section 10.4 (the flat-encoder baseline, which tests the central design claim) is `benchmarks/suite/flat_vs_workspace.py`; its tiny-scale result is in `docs/FLAT_BASELINE_RESULTS.md` and is not evidence about 50M or larger. The suite marks results as untrained when no checkpoint is given. Do not read tiny-preset or untrained numbers as evidence about any scale.

@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Outcome ledger for feedback and drift alarms; routing for option sets above 255 options.
   - Data: 24 dataset converters, 47 synthetic task families, pretraining builders, a benchmark blocklist (`rhen/v2/data/blocklist.json`), and teacher labelling.
   - Trainer and CLI: `rhen2-train` and `rhen2-eval`; configs in `configs/v2/`.
-  - Evaluation suite (`benchmarks/suite/`), ablation script (`run_ablations.py`) and latency script (`benchmarks/latency/`). The flat-baseline ablation (plan 10.4 item 7) is not implemented.
+  - Evaluation suite (`benchmarks/suite/`), ablation script (`run_ablations.py`) and latency script (`benchmarks/latency/`). Flat-encoder baseline with parameter and FLOP matching and a comparison runner (`flat_vs_workspace.py`); the tiny-scale result is in `docs/FLAT_BASELINE_RESULTS.md` (flat baseline more accurate in distribution, workspace exactly option-order invariant).
   - Presets `r2-tiny`, `r2-50m`, `r2-300m`, `r2-1b` and `r2-8b`, with exact parameter counts from `rhen.v2.config.count_parameters`.
 - **Effort tiers & gated intra-branch option isolation**:
   - Added configurable compute effort tiers (`low`, `medium`, `high`) to scale recurrent deliberation depth at inference time.

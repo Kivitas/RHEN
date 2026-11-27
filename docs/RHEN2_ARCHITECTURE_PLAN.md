@@ -1472,7 +1472,7 @@ calibration or latency claim is made anywhere**; the smoke runs prove plumbing o
 | T-601, T-602, T-604, T-605 pipeline, policy, ledger, routing | done, verified | routing-vs-flat accuracy not measured |
 | T-603 v1 wiring | done, verified | default stays v1; v1 suites unchanged |
 | T-701 to T-703 evaluation, ablations, latency | done, verified | smoke runs only, no result files |
-| Section 10.4 item 7 flat-encoder baseline | see `docs/FLAT_BASELINE_RESULTS.md` | the test of the central design claim |
+| Section 10.4 item 7 flat-encoder baseline | done at tiny scale, verified | flat baseline won on in-distribution accuracy; workspace only wins on exact order invariance; must be repeated at 50M |
 | Section 6.3 exact critical-tier C3a | not implemented | |
 | Section 7.4 `L_evidence` | not implemented | needs rationale-annotated data |
 | Section 9.5 forecast cost | implemented as a cost hook on the v2 path | |
@@ -1497,7 +1497,14 @@ have.
    4.5; monitor accuracy at `R=1` vs `R=r_max` every evaluation. If they are
    equal, the loops are not being used.
 3. **The workspace may not beat a flat encoder** at equal compute. Ablation 7
-   in 10.4 decides this early and cheaply. The pipeline, Checker, calibration
+   in 10.4 decides this early and cheaply. **First result (tiny scale, see
+   `docs/FLAT_BASELINE_RESULTS.md`): it did not beat it on accuracy.** At 1.8M
+   parameters, synthetic data, 3 seeds and 200 steps the flat baseline was more
+   accurate in distribution (0.405 vs 0.302, paired +0.103 +- 0.034, 3 of 3
+   seeds), OOD accuracy and ECE were within noise, and only the option-order
+   invariance guarantee held for the workspace (flip rate 0 vs about 0.58). This
+   is a small, under-trained experiment, but it means the central claim is
+   unproven; repeat it at 50M with a real budget before building on it. The pipeline, Checker, calibration
    and data work are all valid with either trunk.
 4. **Attention-based evidence may be unfaithful.** C3a measures it. If the
    deletion effect is weak, switch C2 to gradient-times-input attribution.

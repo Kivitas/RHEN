@@ -867,7 +867,7 @@ Key verified properties:
 - **Large flat configuration.** `RhenConfig` (an alias of `EOSConfig` in `rhen/config.py`) takes 128 named keyword parameters, plus `**kwargs`. Check parameter names against the source before use.
 - **RHEN-2 has no trained checkpoint.** `rhen.v2` has no committed weights, so no RHEN-2 accuracy, calibration, latency or comparison figure exists. Its tests check mechanics only.
 - **RHEN-2 has no measured accuracy or calibration.** The evaluation suite and ablation scripts run, but no result from a trained model is committed. Untrained runs say nothing about the design.
-- **The flat-encoder ablation has not been run.** Plan section 10.4 item 7 compares the workspace with a flat encoder at matched compute. That test of the central design claim is not implemented in `benchmarks/suite/run_ablations.py`, so the design claim is unverified.
+- **The central design claim is not supported on accuracy so far.** A tiny, parameter-matched comparison against a flat-encoder baseline (`docs/FLAT_BASELINE_RESULTS.md`: 1.8M parameters, synthetic data, 3 seeds, 200 steps) found the flat baseline more accurate in distribution (0.405 vs 0.302, 3 of 3 seeds), OOD accuracy and calibration within noise, and the RHEN-2 workspace exactly option-order invariant (flip rate 0 vs about 0.58). Only the invariance guarantee is supported. The comparison must be repeated at 50M with a real training budget before the architecture is judged.
 - **Critical-tier exact evidence masking is not implemented.** The Checker's exact evidence test, which masks input tokens and re-runs the state encoder, is not implemented. Evidence spans come from attention and are not verified exactly at the critical tier.
 
 ---
