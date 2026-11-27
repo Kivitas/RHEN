@@ -663,16 +663,18 @@ which is about `8 d^2`; encoder layer `12 d^2`; core layer (self + cross + FFN)
 | `global_every` | 0 (all global) | 3 | 3 | 3 |
 | evidence subset | off | 256 | 384 | 512 |
 | embedding params | 9.7M | 19.6M | 39.6M | 81.6M |
-| state encoder params | 25.2M | 201.3M | 679.5M | 6,115M |
-| core params | 12.6M | 67.1M | 226.5M | 1,510M |
+| state encoder params | 25.2M | 201.3M | 679.6M | 6,115.6M |
+| core params | 12.6M | 67.1M | 226.6M | 1,510.2M |
 | set layer params | 3.1M | 25.2M | 56.6M | 226.5M |
-| heads + MLM transform | 1.8M | 5.1M | 10.2M | 34.6M |
-| **total** | **52.4M** | **318.3M** | **1,012M** | **7,968M** |
+| readouts, numeric channel, pools, rank table | 1.2M | 3.0M | 5.2M | 15.2M |
+| **total (exact, from `count_parameters`)** | **51.8M** | **316.2M** | **1,007.6M** | **7,949.1M** |
 | effective depth at `r_mean` | 8 + 12 = 20 | 16 + 16 = 32 | 24 + 24 = 48 | 54 + 40 = 94 |
 
-To land R2-50M at or under 50.0M, set `e = 160` (saves 1.6M) and
-`n_scratch = 8`; either is acceptable. Record the exact count from
-`sum(p.numel() ...)` in the run manifest.
+`count_parameters` matches the instantiated model exactly (tested, including
+ablation variants). The MLM head used in pretraining (Section 7.2) is a separate
+module and is not in these counts. To land R2-50M at or under 50.0M, set
+`d_embed = 152` (49.8M). Record the exact count from `sum(p.numel() ...)` in
+the run manifest.
 
 File: `rhen/v2/config.py` holds one `Rhen2Config` dataclass (target: under 40
 fields) and a `PRESETS` dict with these four entries plus `r2-tiny`
@@ -1245,7 +1247,7 @@ three xfail tests.
 **T-101 [Haiku]** Create `rhen/v2/__init__.py`, `rhen/v2/config.py` with
 `Rhen2Config` and `PRESETS` exactly as Section 5 plus `r2-tiny`. Add
 `count_parameters(cfg)` that computes the table's formulas. Test: computed
-totals for the four presets are within 2% of 52.4M, 318.3M, 1012M, 7968M.
+totals for the four presets are within 0.5% of 51.8M, 316.2M, 1007.6M, 7949.1M (done; the formula is exact).
 
 **T-102 [Sonnet]** `rhen/v2/layers.py`: `RMSNorm` (import from `rhen.model`),
 `SwiGLU`, `SelfAttention(d, heads, window=None)`, `CrossAttention(d, heads)`,
@@ -1395,6 +1397,53 @@ this plan first.
 Remove the root shim modules and the duplicate `optim/` and `eos_research/`
 packages in a major version; reduce CI to one full run plus a smoke matrix;
 move v1 model code to `rhen/legacy/`.
+
+---
+
+## 11.1 Implementation notes (what building it changed)
+
+Recorded while implementing Phases 0 to 2 (commit history on this branch). Where the
+text above and this section differ, this section is what the code does.
+
+1. **v1 findings re-verified on running code.** The four `xfail` tests in
+   `tests/test_v1_known_structural_issues.py` reproduce A1 (state token 0 is
+   unchanged by a change to the last state token: difference exactly 0.0), A2
+   (0.0076), A3 (1.3e-4) and A5 (0.0226) on the tiny preset, each failing on its
+   assertion rather than on an error. A9 is fixed (T-001). Commit `bb81f66` on
+   `main` added opt-in option isolation, batched training and RLCD/Range loss
+   changes to v1; A5 is therefore only the default-config behaviour, and the
+   claims about A6 and A10 were not re-checked against that commit.
+2. **Scratch slots come first** in the question sequence, not last. Appended after
+   the padded question, their RoPE distance to the real tokens depended on the
+   longest question in the batch, and an answer changed by 0.024 when another
+   question's text changed. The isolation tests caught it.
+3. **Readout scores are divided by `d_readout`.** RMS-normalised vectors have a dot
+   product that grows with their width; without the division the initial loss was
+   over 70 and logits were in the hundreds.
+4. **Cross-attention uses no RoPE.** Question and option positions live in different
+   position spaces from the state, so relative rotation between them has no meaning.
+   Self-attention inside the encoder, the question group and each option uses RoPE.
+5. **Questions are folded into the query axis** of cross-attention (`per_group`), so
+   the state memory is neither copied nor re-projected per question. The option pass
+   still builds `[state ; question]` memory per question, which copies the state
+   keys and values once per loop; the evidence subset (Section 4.5) bounds that cost.
+6. **Halting is per question but the batch stops when every question has halted.**
+   Finished questions keep their halting-loop output; they are not removed from the
+   batch (compaction is a later optimisation).
+7. **Evidence (C2)** is the final question state's cross-attention mass on the state
+   through the last core layer, averaged over heads and question tokens, not an
+   attention rollout through all layers. Section 6.3 C3a measures whether it is
+   faithful.
+8. **`L_evidence` is not implemented** (it needs rationale-annotated data); the
+   other loss terms are.
+9. **Control ids** sit above the tokenizer vocabulary (ids 50010 to 50019), so no
+   text can produce them and no tokenizer change is needed for the 50k vocabulary.
+   The span-choice gap marker is the plain text `[GAP]`.
+10. **The Checker's correctness head** (C1) lives in `rhen/v2/checker.py`, not in
+    `Rhen2Model`, and the MLM head lives in `rhen/v2/data/pretrain.py`.
+11. **`rhen/v2/data/` needed a `.gitignore` exception**: the repository ignores every
+    directory named `data/`, which silently excluded the package from the first
+    commit.
 
 ---
 
