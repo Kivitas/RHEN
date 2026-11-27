@@ -18,6 +18,7 @@ from typing import Callable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from rhen.v2.config import TYPE_INDEX, Rhen2Config
 from rhen.v2.layers import Attention, AttnPool, EncoderBlock, RMSNorm, Rotary, SwiGLU
@@ -73,9 +74,12 @@ class CoreBlock(nn.Module):
         self.ffn = SwiGLU(d, cfg.ffn_hidden)
         self.out_norm = RMSNorm(d, cfg.norm_eps) if cfg.use_sandwich_norm else None
 
-    def forward(self, x, self_mask, rope, kv, kv_mask, per_group):
+    def forward(self, x, self_mask, rope, kv, kv_mask, per_group, full_mask=False):
         x = x + self.self_attn(self.n_self(x), key_mask=self_mask, rope=rope)
-        x = x + self.cross_attn(self.n_cross(x), kv=kv, key_mask=kv_mask, per_group=per_group)
+        if full_mask:      # kv_mask is a ready [G, 1, Q, Lk] attention mask
+            x = x + self.cross_attn(self.n_cross(x), kv=kv, attn_mask=kv_mask, per_group=per_group)
+        else:
+            x = x + self.cross_attn(self.n_cross(x), kv=kv, key_mask=kv_mask, per_group=per_group)
         x = x + self.ffn(self.n_ffn(x))
         return self.out_norm(x) if self.out_norm is not None else x
 
@@ -83,14 +87,19 @@ class CoreBlock(nn.Module):
 class CoreStack(nn.Module):
     def __init__(self, cfg: Rhen2Config):
         super().__init__()
+        self.cfg = cfg
         self.layers = nn.ModuleList(CoreBlock(cfg) for _ in range(cfg.n_core_layers))
 
     def project(self, mem: torch.Tensor) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         return [layer.cross_attn.project_kv(mem) for layer in self.layers]
 
-    def forward(self, x, self_mask, rope, kvs, kv_mask, per_group):
+    def forward(self, x, self_mask, rope, kvs, kv_mask, per_group, full_mask=False):
+        ckpt = self.cfg.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for layer, kv in zip(self.layers, kvs):
-            x = layer(x, self_mask, rope, kv, kv_mask, per_group)
+            if ckpt:
+                x = checkpoint(layer, x, self_mask, rope, kv, kv_mask, per_group, full_mask, use_reentrant=False)
+            else:
+                x = layer(x, self_mask, rope, kv, kv_mask, per_group, full_mask)
         return x
 
 
@@ -117,8 +126,9 @@ class OptionSetLayer(nn.Module):
         keep = torch.ones(n, 2, dtype=torch.bool, device=u.device)
         mask = torch.cat([keep, opt_valid], dim=1)
         if self.cfg.use_set_layer:
+            ckpt = self.cfg.gradient_checkpointing and self.training and torch.is_grad_enabled()
             for block in self.blocks:
-                x = block(x, key_mask=mask)
+                x = checkpoint(block, x, mask, use_reentrant=False) if ckpt else block(x, key_mask=mask)
             x = self.norm(x)
         return x[:, 0], x[:, 1], x[:, 2:]
 
@@ -197,6 +207,22 @@ class DeliberationWorkspace(nn.Module):
 
         state_mask_q = per_q(state_mask)
         b_of_q = torch.arange(n, device=dev) // (1 if per_question else m)
+        lq_ext = qmask_ext.shape[1]
+        shared_mask = None
+
+        def fold_q(t: torch.Tensor) -> torch.Tensor:
+            """[N, H, Lq', hd] -> [G, H, M*Lq', hd]: all questions of an example side by side."""
+            h, hd = t.shape[1], t.shape[3]
+            return t.view(n // m, m, h, lq_ext, hd).permute(0, 2, 1, 3, 4).reshape(n // m, h, m * lq_ext, hd)
+
+        if not per_question and not use_subset:
+            g = n // m
+            jq = torch.arange(m, device=dev).repeat_interleave(k * lo)                   # question of each option query
+            jk = torch.arange(m, device=dev).repeat_interleave(lq_ext)                   # question of each question key
+            own = jq[:, None] == jk[None, :]                                           # [m*k*lo, m*lq']
+            qpart = own[None] & qmask_ext.view(g, 1, m * lq_ext)
+            spart = state_mask[:, None, :].expand(g, m * k * lo, ls)
+            shared_mask = torch.cat([spart, qpart], dim=2)[:, None]                  # [G, 1, m*k*lo, Ls + m*lq']
 
         def one_loop(Q, O, want_readout: bool, want_mass: bool = False):
             Qin = Q + q0 if cfg.use_reinjection else Q
@@ -214,20 +240,28 @@ class DeliberationWorkspace(nn.Module):
             if use_subset:
                 score = mass.masked_fill(~state_mask_q, -float("inf"))
                 score[:, 0] = float("inf")                       # position 0 (null span) is always kept
-                idx = score.topk(min(cfg.evidence_n, ls), dim=-1).indices
+                # Stable sort: ties resolve to the lower position, independent of padding and batch layout.
+                idx = score.sort(dim=-1, descending=True, stable=True).indices[:, : min(cfg.evidence_n, ls)]
                 flat = (b_of_q[:, None] * ls + idx).reshape(-1)
                 s_sel = S.reshape(-1, d)[flat].view(n, idx.shape[1], d)
                 sel_mask = state_mask.reshape(-1)[flat].view(n, idx.shape[1])
                 kvs_o = self.stack.project(torch.cat([s_sel, Qn], dim=1))
                 mask_o = torch.cat([sel_mask, qmask_ext], dim=1)
-            else:
+            elif per_question:
                 kq = self.stack.project(Qn)
-                kvs_o = [
-                    (torch.cat([per_q(ks), qk], dim=2), torch.cat([per_q(vs), qv], dim=2))
-                    for (ks, vs), (qk, qv) in zip(kvs_S, kq)
-                ]
+                kvs_o = [(torch.cat([ks, qk], dim=2), torch.cat([vs, qv], dim=2)) for (ks, vs), (qk, qv) in zip(kvs_S, kq)]
                 mask_o = torch.cat([state_mask_q, qmask_ext], dim=1)
-            On = self.stack(Oin, o_mask_flat, rope_o, kvs_o, mask_o, k)
+            else:
+                # Shared state: keys are [state ; every question's tokens of this example], stored once per
+                # example. A block mask lets each question's options see the state and only their own
+                # question, so the state is never copied per question.
+                kq = self.stack.project(Qn)
+                kvs_o = []
+                for (ks, vs), (qk, qv) in zip(kvs_S, kq):
+                    kvs_o.append((torch.cat([ks, fold_q(qk)], dim=2), torch.cat([vs, fold_q(qv)], dim=2)))
+                mask_o = shared_mask
+            On = self.stack(Oin, o_mask_flat, rope_o, kvs_o, mask_o, k if (use_subset or per_question) else m * k,
+                            full_mask=not (use_subset or per_question))
 
             q_vec = self.q_pool(Qn, qmask_ext)
             u = self.o_pool(On, o_mask_flat).view(n, k, d) + rank
@@ -236,7 +270,7 @@ class DeliberationWorkspace(nn.Module):
             a = self.alpha.to(Qn.dtype)
             Qnext = Q + a * (Qn - Q)
             Onext = O + a * (On - O)
-            out = readout(q2, u2, null2, opt_valid, null_delta=null_delta) if want_readout else None
+            out = self._readout_fp32(readout, q2, u2, null2, opt_valid, null_delta) if want_readout else None
             return Qnext, Onext, out, q2, mass
 
         Q, O = q0, o0
@@ -282,6 +316,12 @@ class DeliberationWorkspace(nn.Module):
                     break
         return {"final": final, "per_loop": [final], "halts": halts, "loops_run": loops_run,
                 "q_vec": q_final, "mass": mass_final}
+
+    @staticmethod
+    def _readout_fp32(readout, q2, u2, null2, opt_valid, null_delta):
+        """Readouts always run in float32 (softmax, cumulative link and quantile cumsum lose too much in bf16)."""
+        with torch.autocast(device_type=q2.device.type, enabled=False):
+            return readout(q2.float(), u2.float(), null2.float(), opt_valid, null_delta=null_delta)
 
     @staticmethod
     def _mass_shared(attn: Attention, Qn, kv, state_mask, qmask_ext, m: int) -> torch.Tensor:

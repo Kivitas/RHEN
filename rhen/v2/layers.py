@@ -35,11 +35,12 @@ class Rotary(nn.Module):
         inv = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
         self.register_buffer("inv_freq", inv, persistent=False)
 
-    def forward(self, length: int, device: torch.device, dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, length: int, device: torch.device, dtype: Optional[torch.dtype] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         t = torch.arange(length, device=device, dtype=torch.float32)
         freqs = torch.outer(t, self.inv_freq.to(device))
         emb = torch.cat([freqs, freqs], dim=-1)
-        return emb.cos().to(dtype), emb.sin().to(dtype)
+        # Always float32: bf16 cos/sin lose position information beyond a few hundred tokens.
+        return emb.cos(), emb.sin()
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -48,8 +49,9 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """``x`` is [N, H, L, hd]; ``cos``/``sin`` are [L, hd]."""
-    return x * cos + _rotate_half(x) * sin
+    """``x`` is [N, H, L, hd]; ``cos``/``sin`` are [L, hd]. Computed in float32, returned in ``x.dtype``."""
+    xf = x.float()
+    return (xf * cos.float() + _rotate_half(xf) * sin.float()).to(x.dtype)
 
 
 class SwiGLU(nn.Module):

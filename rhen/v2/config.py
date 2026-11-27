@@ -59,6 +59,7 @@ class Rhen2Config:
     use_reinjection: bool = True
     use_damping: bool = True
     use_sandwich_norm: bool = True
+    gradient_checkpointing: bool = False   # recompute encoder blocks and core layers in backward (training only)
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads != 0:

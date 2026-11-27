@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from rhen.v2.config import Rhen2Config
 from rhen.v2.layers import EncoderBlock, RMSNorm, Rotary
@@ -37,11 +38,15 @@ class StateEncoder(nn.Module):
         length = x.shape[1]
         rope = self.rotary(length, x.device, x.dtype)
         local = None
+        ckpt = self.cfg.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for i, block in enumerate(self.blocks):
-            if self.is_global(i):
-                x = block(x, key_mask=mask, rope=rope)
-            else:
+            attn_mask = None
+            if not self.is_global(i):
                 if local is None:
                     local = self._local_mask(length, x.device)
-                x = block(x, key_mask=mask, attn_mask=local, rope=rope)
+                attn_mask = local
+            if ckpt:
+                x = checkpoint(block, x, mask, attn_mask, rope, use_reentrant=False)
+            else:
+                x = block(x, key_mask=mask, attn_mask=attn_mask, rope=rope)
         return self.norm(x)

@@ -69,24 +69,34 @@ class Rhen2Model(nn.Module):
             if getattr(module, "bias", None) is not None:
                 nn.init.zeros_(module.bias)
 
+    def _apply(self, fn, *args, **kwargs):
+        """``model.to(bfloat16)`` keeps the readout heads in float32 (see ``Workspace._readout_fp32``)."""
+        out = super()._apply(fn, *args, **kwargs)
+        if any(p.dtype in (torch.bfloat16, torch.float16) for p in self.readout.parameters()):
+            self.readout.float()
+        return out
+
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
     # -- encoding ------------------------------------------------------------
     def encode_state(self, state_ids: torch.Tensor, state_mask: torch.Tensor, state_num: torch.Tensor) -> torch.Tensor:
-        x = self.embed(state_ids) + self.segment.weight[0]
+        x = self.embed(state_ids)
+        x = x + self.segment.weight[0].to(x.dtype)
         if self.numeric is not None:
-            x = x + self.numeric(state_num.to(x.dtype))
+            x = x + self.numeric(state_num.to(x.dtype)).to(x.dtype)
         return self.encoder(x, state_mask)
 
     def _question_inputs(self, batch: Rhen2Batch):
         b, m, lq = batch.q_ids.shape
         k, lo = batch.opt_ids.shape[2], batch.opt_ids.shape[3]
         n = b * m
-        q = self.embed(batch.q_ids) + self.segment.weight[1] + self.qtype(batch.q_type)[:, :, None]
+        q = self.embed(batch.q_ids)
+        q = q + self.segment.weight[1].to(q.dtype) + self.qtype(batch.q_type)[:, :, None].to(q.dtype)
         if self.numeric is not None:
-            q = q + self.numeric(batch.q_num.to(q.dtype))
-        o = self.embed(batch.opt_ids) + self.segment.weight[2]
+            q = q + self.numeric(batch.q_num.to(q.dtype)).to(q.dtype)
+        o = self.embed(batch.opt_ids)
+        o = o + self.segment.weight[2].to(o.dtype)
         return (
             q.reshape(n, lq, -1), batch.q_mask.reshape(n, lq),
             o.reshape(n, k, lo, -1), batch.opt_mask.reshape(n, k, lo),
@@ -128,8 +138,9 @@ class Rhen2Model(nn.Module):
         final: ReadoutOut = ws["final"]
         q_vec = ws["q_vec"]
 
-        s_proj = self.readout.project_state_for_spans(mem)
-        start, end = self.readout.span_logits(q_vec, s_proj, state_mask, group=1 if per_question else m)
+        with torch.autocast(device_type=q_vec.device.type, enabled=False):
+            s_proj = self.readout.project_state_for_spans(mem.float())
+            start, end = self.readout.span_logits(q_vec.float(), s_proj, state_mask, group=1 if per_question else m)
 
         is_score = (q_type == SCORE)[:, None]
         probs = torch.where(is_score, final.score_probs, final.probs)
