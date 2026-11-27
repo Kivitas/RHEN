@@ -1,0 +1,42 @@
+{
+  "run_dir": "runs/v2/r2_300m_pretrain",
+  "stage": "pretrain",
+  "seed": 0,
+  "preset": "r2-300m",
+  "notes": "Plan 5.1 50M -> 300M: local/global schedule (global_every 3, window 128), evidence subset 256, hidden-matrix LR scaled by base_width/d_model = 0.5 (muP, rhen/v2/optim.py), embeddings and readouts keep the base LR, DDP across GPUs. State length curriculum: 2048 tokens for the first 60% of steps, then 8192. Token budget guidance is 30 to 50B tokens. Re-tune only the peak LR on a 3-point sweep.",
+  "model_overrides": {
+    "global_every": 3,
+    "local_window": 128,
+    "evidence_n": 256
+  },
+  "pretrain_weights": [
+    0.4,
+    0.4,
+    0.2
+  ],
+  "pretrain_corpus_dir": "data/v2/corpus",
+  "pretrain_structured_frac": 0.5,
+  "state_len_curriculum": [
+    [
+      0.0,
+      2048
+    ],
+    [
+      0.6,
+      8192
+    ]
+  ],
+  "steps": 150000,
+  "batch_questions": 256,
+  "grad_accum": 4,
+  "lr": 0.0003,
+  "base_width": 512,
+  "precision": "bf16",
+  "ema_decay": 0.999,
+  "dist_strategy": "ddp",
+  "gradient_checkpointing": false,
+  "log_every": 50,
+  "eval_every": 2000,
+  "save_every": 2000,
+  "keep_last": 3
+}

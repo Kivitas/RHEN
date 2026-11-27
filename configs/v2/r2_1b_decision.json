@@ -1,0 +1,52 @@
+{
+  "run_dir": "runs/v2/r2_1b_decision",
+  "stage": "decision",
+  "seed": 0,
+  "preset": "r2-1b",
+  "notes": "Plan 5.1 / 7.3 at 1B: gradient checkpointing and FSDP as in the pretraining config.",
+  "model_overrides": {
+    "global_every": 3,
+    "local_window": 128,
+    "evidence_n": 384
+  },
+  "init_from": "runs/v2/r2_1b_pretrain",
+  "teacher_jsonl": [
+    "data/v2/teacher/train.jsonl"
+  ],
+  "converted_jsonl": [
+    "data/v2/converted/train.jsonl"
+  ],
+  "synthetic": [
+    {
+      "n": 200000,
+      "seed": 1,
+      "unanswerable_rate": 0.12
+    }
+  ],
+  "decision_weights": {
+    "teacher": 0.45,
+    "converted": 0.35,
+    "synthetic": 0.2
+  },
+  "span_choice_frac": 0.1,
+  "pretrain_corpus_dir": "data/v2/corpus",
+  "eval_jsonl": [],
+  "eval_synthetic": {
+    "split": "val",
+    "n": 2000,
+    "seed": 1
+  },
+  "steps": 40000,
+  "batch_questions": 64,
+  "grad_accum": 8,
+  "lr": 0.00015,
+  "base_width": 512,
+  "precision": "bf16",
+  "ema_decay": 0.999,
+  "dist_strategy": "fsdp",
+  "gradient_checkpointing": true,
+  "log_every": 50,
+  "eval_every": 1000,
+  "save_every": 500,
+  "keep_last": 2
+}

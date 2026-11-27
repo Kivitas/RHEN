@@ -1,0 +1,31 @@
+{
+  "run_dir": "runs/v2/r2_50m_pretrain",
+  "stage": "pretrain",
+  "seed": 0,
+  "preset": "r2-50m",
+  "notes": "Plan 5.1 / 7.2: single 24 GB GPU, bf16, AdamW, all-global attention, no evidence subset, no gradient checkpointing. Token budget guidance from the plan is 5 to 10B tokens: steps = tokens / (batch_questions x grad_accum x ~200 tokens per slot); 100000 steps at 256 slots is about 5e9 tokens. Revise from loss curves. Run a 3-point peak-LR sweep first (plan 7.4).",
+  "model_overrides": {
+    "d_embed": 192
+  },
+  "pretrain_weights": [
+    0.4,
+    0.4,
+    0.2
+  ],
+  "pretrain_corpus_dir": "data/v2/corpus",
+  "pretrain_structured_frac": 0.5,
+  "steps": 100000,
+  "batch_questions": 256,
+  "grad_accum": 1,
+  "lr": 0.0003,
+  "base_width": 512,
+  "precision": "bf16",
+  "device": "auto",
+  "ema_decay": 0.999,
+  "dist_strategy": "none",
+  "gradient_checkpointing": false,
+  "log_every": 50,
+  "eval_every": 2000,
+  "save_every": 2000,
+  "keep_last": 3
+}

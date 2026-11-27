@@ -1,0 +1,55 @@
+{
+  "run_dir": "runs/v2/r2_8b_adapter",
+  "stage": "adapter",
+  "seed": 0,
+  "preset": "r2-8b",
+  "notes": "Plan 5.1 1B -> 8B option (b) (recommended): a PRETRAINED open LLM of similar size is the State Encoder through an adapter (as Microsoft did with Qwen3.5-9B); its attention is converted to bidirectional with a short masked-token adaptation phase, and the workspace, set layer, readouts and Checker are trained from scratch on top. This needs a pretrained backbone (adapter_backbone, a local path) and the v1 rhen/adapter.py as the starting point. The trainer raises NotImplementedError for this stage; the config exists so the required keys are fixed. Option (a), training the 8B from scratch, needs roughly a trillion pretraining tokens and is a compute decision, not a config change.",
+  "model_overrides": {
+    "global_every": 3,
+    "local_window": 128,
+    "evidence_n": 512
+  },
+  "adapter_backbone": "models/open-llm-backbone",
+  "adapter_freeze_backbone_steps": 2000,
+  "adapter_bidirectional_adaptation_steps": 5000,
+  "adapter_layers_trainable": 0,
+  "teacher_jsonl": [
+    "data/v2/teacher/train.jsonl"
+  ],
+  "converted_jsonl": [
+    "data/v2/converted/train.jsonl"
+  ],
+  "synthetic": [
+    {
+      "n": 200000,
+      "seed": 1,
+      "unanswerable_rate": 0.12
+    }
+  ],
+  "decision_weights": {
+    "teacher": 0.45,
+    "converted": 0.35,
+    "synthetic": 0.2
+  },
+  "span_choice_frac": 0.1,
+  "pretrain_corpus_dir": "data/v2/corpus",
+  "eval_jsonl": [],
+  "eval_synthetic": {
+    "split": "val",
+    "n": 2000,
+    "seed": 1
+  },
+  "steps": 60000,
+  "batch_questions": 64,
+  "grad_accum": 16,
+  "lr": 0.0001,
+  "base_width": 512,
+  "precision": "bf16",
+  "ema_decay": 0.999,
+  "dist_strategy": "fsdp",
+  "gradient_checkpointing": true,
+  "log_every": 50,
+  "eval_every": 1000,
+  "save_every": 500,
+  "keep_last": 2
+}

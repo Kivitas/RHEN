@@ -1,0 +1,33 @@
+{
+  "run_dir": "runs/v2/r2_1b_pretrain",
+  "stage": "pretrain",
+  "seed": 0,
+  "preset": "r2-1b",
+  "notes": "Plan 5.1 300M -> 1B: gradient checkpointing on the state encoder and FSDP. Decide the tokenizer (64k multilingual if non-English is a goal) BEFORE this run; it changes V and must not change between pretraining and fine-tuning. Token budget guidance is 100 to 200B tokens. State cache in serving becomes mandatory at 16k states. This model becomes the teacher for distilling the 50M and 300M students (plan 7.5).",
+  "model_overrides": {
+    "global_every": 3,
+    "local_window": 128,
+    "evidence_n": 384
+  },
+  "pretrain_weights": [
+    0.4,
+    0.4,
+    0.2
+  ],
+  "pretrain_corpus_dir": "data/v2/corpus",
+  "pretrain_structured_frac": 0.5,
+  "state_len_curriculum": [],
+  "steps": 200000,
+  "batch_questions": 256,
+  "grad_accum": 8,
+  "lr": 0.0003,
+  "base_width": 512,
+  "precision": "bf16",
+  "ema_decay": 0.999,
+  "dist_strategy": "fsdp",
+  "gradient_checkpointing": true,
+  "log_every": 50,
+  "eval_every": 2000,
+  "save_every": 1000,
+  "keep_last": 2
+}
