@@ -15,7 +15,13 @@ Ablation switches
                       Rhen2Config flags;  no_scratch: n_scratch=0
 
 Tiny CPU runs say nothing about 50M-scale conclusions: differences are usually within seed noise.
-Item 7 (flat baseline) is not implemented here.
+
+Item 7 (flat baseline) is the variant ``flat_baseline``: ``rhen.v2.flat_baseline.FlatBaselineModel`` with
+the layer count chosen by ``matched_flat_config`` so its parameter count matches the r2-tiny RHEN-2 model
+(one encoder over [state ; question ; marker + option tokens], no loops, no option-set layer). It trains
+with the same loop, data, steps and seeds. ``--compare-flat`` runs ``full`` and ``flat_baseline`` (adding
+them to the selected variants) and appends a parameter / FLOPs / paired-difference section. The fuller
+comparison (OOD split, option-shuffle flip rate) is benchmarks/suite/flat_vs_workspace.py.
 
     python3 benchmarks/suite/run_ablations.py --steps 60 --seeds 0,1,2 --out-dir /tmp/abl
 """
@@ -53,6 +59,7 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
     "no_null": {"cfg": {"use_null": False}},
     "no_numeric": {"cfg": {"use_numeric": False}},
     "no_scratch": {"cfg": {"n_scratch": 0}},
+    "flat_baseline": {"flat": True},
 }
 
 
@@ -79,7 +86,13 @@ def train_and_eval(name: str, spec: Dict[str, Any], train_ex, eval_ex, steps: in
 
     torch.manual_seed(seed)
     cfg = preset(preset_name, **spec.get("cfg", {}))
-    model, pk = Rhen2Model(cfg), Rhen2Packer(cfg)
+    pk = Rhen2Packer(cfg)
+    if spec.get("flat"):
+        from rhen.v2.flat_baseline import FlatBaselineModel, matched_flat_config
+        cfg = matched_flat_config(cfg)
+        model = FlatBaselineModel(cfg)
+    else:
+        model = Rhen2Model(cfg)
     rng = random.Random(seed)
     order = list(train_ex)
     rng.shuffle(order)
@@ -98,7 +111,7 @@ def train_and_eval(name: str, spec: Dict[str, Any], train_ex, eval_ex, steps: in
     t0 = time.perf_counter()
     for step in range(steps):
         batch = batches[step % len(batches)]
-        plan = LoopPlan.sample(cfg, gen)
+        plan = None if spec.get("flat") else LoopPlan.sample(cfg, gen)    # the flat model has no loops
         if "fixed_loops" in spec:
             plan = LoopPlan(n_loops=spec["fixed_loops"], k_bptt=cfg.k_bptt, min_loops=spec["fixed_loops"], train=True)
         if "k_bptt" in spec:
@@ -122,6 +135,7 @@ def train_and_eval(name: str, spec: Dict[str, Any], train_ex, eval_ex, steps: in
     d = ev.discrete_metrics(recs)
     n_ex = max(len(eval_ex), 1)
     return {"variant": name, "seed": seed, "accuracy": d.get("accuracy"), "ece": d.get("ece_15bin"),
+            "n_params": model.num_parameters(),
             "n_eval_questions": d.get("n", 0), "ms_per_example": 1000.0 * sum(t["seconds"] for t in timings) / n_ex,
             "final_train_loss": last_loss, "train_seconds": train_seconds}
 
@@ -149,6 +163,47 @@ def markdown_table(agg: Dict[str, Dict[str, Any]], steps: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+def compare_flat(runs: List[Dict[str, Any]], steps: int) -> Dict[str, Any]:
+    """Paired (same seed) flat_baseline minus full, plus parameter counts and FLOPs per example (matmul estimate)."""
+    from rhen.v2.config import preset
+    from rhen.v2.flat_baseline import FlatBaselineModel, flops_estimate, matched_flat_config
+    from rhen.v2.model import Rhen2Model
+    from rhen.v2.packing import Rhen2Packer
+
+    cfg = preset("r2-tiny")
+    ws, flat = Rhen2Model(cfg), FlatBaselineModel(matched_flat_config(cfg))
+    pk = Rhen2Packer(cfg)
+    fits = []
+    for e in load_data("v1", 8, 24, 0)[1]:
+        try:
+            pk.pack([e])
+            fits.append(e)
+        except ValueError:
+            pass
+    probe = pk.pack(fits[:8])
+    out: Dict[str, Any] = {
+        "n_params": {"full": ws.num_parameters(), "flat_baseline": flat.num_parameters()},
+        "flat_layers": flat.cfg.n_state_layers,
+        "flops_per_example_probe": {"full": flops_estimate(ws, probe), "flat_baseline": flops_estimate(flat, probe)},
+        "paired_flat_minus_full": {},
+    }
+    by = {(r["variant"], r["seed"]): r for r in runs}
+    for key in ("accuracy", "ece"):
+        d = [by[("flat_baseline", s)][key] - by[("full", s)][key] for (v, s) in by if v == "full"
+             if ("flat_baseline", s) in by and by[("flat_baseline", s)][key] is not None and by[("full", s)][key] is not None]
+        if d:
+            out["paired_flat_minus_full"][key] = {"mean": float(np.mean(d)), "std": float(np.std(d, ddof=1)) if len(d) > 1 else 0.0,
+                                                 "n_seeds": len(d)}
+    lines = [f"Flat baseline vs full ({steps} steps, r2-tiny, tiny CPU run; within-noise differences mean nothing).", "",
+             f"parameters: full {out['n_params']['full']:,}, flat_baseline {out['n_params']['flat_baseline']:,} "
+             f"({out['flat_layers']} layers). FLOPs per example on a probe batch: full "
+             f"{out['flops_per_example_probe']['full']:.3g}, flat_baseline {out['flops_per_example_probe']['flat_baseline']:.3g}."]
+    for key, e in out["paired_flat_minus_full"].items():
+        lines.append(f"paired {key} (flat minus full, {e['n_seeds']} seeds): {e['mean']:+.3f} +- {e['std']:.3f}")
+    out["markdown"] = "\n".join(lines) + "\n"
+    return out
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--steps", type=int, default=40)
@@ -157,6 +212,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--n-train", type=int, default=128)
     p.add_argument("--n-eval", type=int, default=64)
     p.add_argument("--lr", type=float, default=2e-3)
+    p.add_argument("--compare-flat", action="store_true",
+                   help="also run 'full' and 'flat_baseline' and append a parameter / FLOPs / paired comparison")
     p.add_argument("--data-source", choices=("v1", "v2"), default="v1",
                    help="v1: rhen.research.tasks (short states, fast); v2: rhen.v2.data.synth")
     p.add_argument("--out-dir", type=Path, default=Path(__file__).resolve().parent / "ablations")
@@ -166,6 +223,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     names = list(VARIANTS) if args.variants == "all" else args.variants.split(",")
+    if args.compare_flat:
+        names += [n for n in ("full", "flat_baseline") if n not in names]
     unknown = [n for n in names if n not in VARIANTS]
     if unknown:
         raise SystemExit(f"unknown variants {unknown}; choose from {list(VARIANTS)}")
@@ -177,6 +236,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             runs.append(train_and_eval(name, VARIANTS[name], train_ex, eval_ex, args.steps, seed, args.lr))
             print(f"seed {seed} {name}: acc={runs[-1]['accuracy']} ece={runs[-1]['ece']}", file=sys.stderr)
     agg = aggregate(runs)
+    flat_cmp = compare_flat(runs, args.steps) if args.compare_flat else None
     results = {
         "benchmark": "rhen2-ablations", "trained": "tiny budget only", "model": "r2-tiny",
         "steps": args.steps, "seeds": seeds, "data_source": args.data_source,
@@ -185,11 +245,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         "environment": run_suite.environment(), "command": "python3 " + shlex.join(sys.argv),
         "variants": agg, "runs": runs,
         "caveat": "tiny CPU runs with few steps say nothing about 50M-scale conclusions; most differences are "
-                  "inside seed noise. Plan item 7 (flat baseline) is not run here.",
+                  "inside seed noise. Plan item 7 is the 'flat_baseline' variant (see flat_vs_workspace.py for "
+                  "the OOD and option-shuffle comparison).",
     }
+    if flat_cmp is not None:
+        results["flat_comparison"] = flat_cmp
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "ablations.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     table = markdown_table(agg, args.steps)
+    if flat_cmp is not None:
+        table += "\n" + flat_cmp["markdown"]
     (args.out_dir / "ablations.md").write_text(table, encoding="utf-8")
     print(table)
     return 0
