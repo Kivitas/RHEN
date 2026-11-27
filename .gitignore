@@ -92,3 +92,6 @@ Thumbs.db
 *.swo
 *.sublime-workspace
 *.sublime-project
+
+# RHEN-2 source package that happens to be named data/ (the rule above is for dataset folders)
+!rhen/v2/data/
