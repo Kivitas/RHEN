@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "ngram_n": 13,
+  "benchmarks": {
+    "banking77-test": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "clinc150-test": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "sst2-validation": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "ag_news-test": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "trec-test": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "mnli-validation": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "boolq-validation": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "arc-test": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "race-test": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "commonsenseqa-validation": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "goemotions-test": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "squad2-validation": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "stsb-test": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "yelp-test": {
+      "note": "benchmark split that must never be trained on",
+      "fingerprints": {}
+    },
+    "jev-evals": {
+      "note": "Name only: JEV's published benchmark suites; no data available, register fingerprints if the files are obtained.",
+      "fingerprints": {}
+    },
+    "microsoft-decision-1-suite": {
+      "note": "Name only: Microsoft-Decision-1's 36-benchmark suite; no data available, register fingerprints if the files are obtained.",
+      "fingerprints": {}
+    }
+  }
+}
