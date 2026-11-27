@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **RHEN-2 (`rhen.v2`, work in progress)**. Design in `docs/RHEN2_ARCHITECTURE_PLAN.md`; nothing is trained and no accuracy, latency or calibration result is claimed.
+  - Cached-State Deliberation Lattice model: state encoder run once and cacheable, deliberation workspace with weight-shared loops, option-set layer (order-invariant by construction), typed readouts (choice, noul, score, multi, range, extract) with a trained null option.
+  - Packing (`Rhen2Packer`, `QuestionSpec`, `Rhen2Example`), losses, and the Checker (correctness head, evidence spans, interventions, rule checks, verdicts).
+  - Calibration layer (temperatures, isotonic, group conformal sets, OOD) and a unified decision pipeline (`DecisionPipeline`) with an expected-loss policy and a fail-closed rule: without calibration nothing above the `low` tier executes.
+  - Outcome ledger for feedback and drift alarms; routing for option sets above 255 options.
+  - Data: 24 dataset converters, 47 synthetic task families, pretraining builders, a benchmark blocklist (`rhen/v2/data/blocklist.json`), and teacher labelling.
+  - Trainer and CLI: `rhen2-train` and `rhen2-eval`; configs in `configs/v2/`.
+  - Evaluation suite (`benchmarks/suite/`), ablation script (`run_ablations.py`) and latency script (`benchmarks/latency/`). The flat-baseline ablation (plan 10.4 item 7) is not implemented.
+  - Presets `r2-tiny`, `r2-50m`, `r2-300m`, `r2-1b` and `r2-8b`, with exact parameter counts from `rhen.v2.config.count_parameters`.
 - **Effort tiers & gated intra-branch option isolation**:
   - Added configurable compute effort tiers (`low`, `medium`, `high`) to scale recurrent deliberation depth at inference time.
   - Added gated intra-branch option isolation (`isolate_branch_options`) so candidate options within a decision branch can be masked from cross-attending to one another to strengthen option-order invariance.
@@ -42,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `OrchestratorConfig`: `use_fused_recurrent_kernels`, `checkpoint_policy`, `use_triton`
 
 ### Fixed
+- **`forward_rhen` without a decision head.** `forward_rhen` now raises `RuntimeError` when `enable_rhen=False`, instead of returning random decisions.
+- **Known v1 structural limits are documented by tests.** Four `xfail(strict=True)` tests in `tests/test_v1_known_structural_issues.py` record the v1 decision-path limits: the state is not bidirectional in odd layers, the slot channel mixes branches, positions make answers depend on order, and option isolation is opt-in. These are known limits, not fixes; `rhen.v2` provides the properties by construction.
 - **Adapter mask order.** `HuggingFaceEncoderAdapter` again tries the packed 4D branch-isolation mask first. Any exception from that attempt is retried once with the 2D padding mask, as in 1.0.0. If the 2D attempt also fails, the original 4D error is raised, chained to the second. An encoder without an `attention_mask` keyword is still called without one (DEBUG log).
 - **Mask downgrade logging.** The 4D-to-2D downgrade logs one WARNING per encoder instance, because branch isolation may not hold for that encoder.
 - **Tokenizer fallback.** `SemanticBoundaryChunker.count_tokens` catches `Exception` again, so tokenizers that raise plain `Exception` subclasses fall back to the character estimate. The fallback logs one WARNING.

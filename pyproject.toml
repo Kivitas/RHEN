@@ -60,9 +60,11 @@ rhen-train = "cli.train:main"
 rhen-eval = "cli.eval:main"
 rhen-tasks = "cli.tasks:main"
 rhen-sweep = "eos_research.sweep:main"
+rhen2-train = "rhen.v2.cli:main_train"
+rhen2-eval = "rhen.v2.cli:main_eval"
 
 [tool.setuptools]
-packages = ["rhen", "rhen.optim", "rhen.research", "optim", "eos_research", "cli"]
+packages = ["rhen", "rhen.optim", "rhen.research", "rhen.v2", "rhen.v2.data", "rhen.v2.data.converters", "optim", "eos_research", "cli"]
 py-modules = [
     "adapter",
     "agent_tools",
@@ -86,4 +88,5 @@ py-modules = [
 
 [tool.setuptools.package-data]
 rhen = ["py.typed", "tokenizer_assets/*"]
+"rhen.v2.data" = ["blocklist.json"]
 "*" = ["configs/*.json"]

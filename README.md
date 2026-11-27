@@ -57,6 +57,7 @@ print(f"Action: {result.choice_label} (Confidence: {result.confidence:.2%}, Abst
   - [OOD Regression Guard & Verification Lattice](#ood-regression-guard--verification-lattice)
 - [Predictive layer and forecast-aware decisions](#predictive-layer-and-forecast-aware-decisions)
 - [Installation & Quickstart](#installation--quickstart)
+- [RHEN-2 (work in progress)](#rhen-2-work-in-progress)
 - [Agent Framework Integrations](#agent-framework-integrations)
   - [1. LangChain / LangGraph Semantic Router](#1-langchain--langgraph-semantic-router)
   - [2. CrewAI / AutoGen Action Guard](#2-crewai--autogen-action-guard)
@@ -599,6 +600,65 @@ python examples/07_agent_framework_integrations.py
 
 ---
 
+## RHEN-2 (work in progress)
+
+`rhen.v2` is a second decision architecture, Cached-State Deliberation Lattice (CSDL), developed next to the v1 code above. It is **untrained**: no checkpoint is committed, and no accuracy, calibration or latency result has been measured. The code and the tests show that the mechanics run.
+
+The design has five parts, each aimed at a specific v1 problem:
+
+1. **State encoder.** A bidirectional encoder reads the state once. Its output is a memory that can be cached by state hash and reused across questions.
+2. **Deliberation workspace.** A small weight-shared block runs `R` loops over only the question and option tokens, reading the state memory by cross-attention. Extra compute goes to thinking about the decision, not to re-reading the state.
+3. **Option set layer.** Options are treated as a set with no positions, so option-order invariance holds by construction rather than by a second training pass.
+4. **Typed readouts with a null option.** Every question has a "cannot tell" column, so abstention is a trained output rather than only a threshold.
+5. **Checker.** A built-in reasoner that estimates P(correct), returns evidence spans, runs interventions on the cached state and checks determinism. Its verdict is CONFIRM, REVISE or ESCALATE.
+
+A minimal example, verified to run on the tiny preset. The model is untrained, so the probabilities are arbitrary; the null column dominates because of its initial bias.
+
+```python
+import torch
+from rhen.v2.config import preset
+from rhen.v2.model import Rhen2Model
+from rhen.v2.packing import QuestionSpec, Rhen2Example, Rhen2Packer
+
+torch.manual_seed(0)
+cfg = preset("r2-tiny")
+model = Rhen2Model(cfg).eval()          # untrained: the probabilities below are meaningless
+packer = Rhen2Packer(cfg)
+
+example = Rhen2Example(
+    state="Cluster node cpu=99%, disk=full, last restart 3 days ago.",
+    questions=[
+        QuestionSpec(type="choice", instructions="What should be done?",
+                     options=["Throttle", "Restart", "Ignore"]),
+        QuestionSpec(type="noul", instructions="Is the disk full?"),
+    ],
+)
+batch = packer.pack([example])
+with torch.no_grad():
+    out = model(batch)
+print("probs shape:", tuple(out.probs.shape))
+print("choice probs (Throttle, Restart, Ignore, null):", [round(p, 3) for p in out.probs[0].tolist()])
+print("noul probs:", [round(p, 3) for p in out.probs[1].tolist()])
+```
+
+Run it from the repository root with `PYTHONPATH=.`, or after `pip install -e .`. Output on the untrained tiny model is `probs shape: (2, 4)`, followed by two rows of four probabilities that sum to 1 each.
+
+Parameter counts come from `rhen.v2.config.count_parameters`, which matches the instantiated model exactly. These are targets, not trained results:
+
+| Preset | Width `d` | Total parameters (exact) |
+| :--- | ---: | ---: |
+| `r2-50m` | 512 | 51,842,962 (about 52M) |
+| `r2-300m` | 1024 | 316,204,562 (about 316M) |
+| `r2-1b` | 1536 | 1,007,597,842 (about 1.0B) |
+| `r2-8b` | 3072 | 7,949,103,890 (about 7.9B) |
+
+The `r2-tiny` preset used above is for tests only. The pipeline refuses to stage actions from an untrained model, and without calibration nothing above the `low` tier can execute.
+
+- Design and rationale: [`docs/RHEN2_ARCHITECTURE_PLAN.md`](docs/RHEN2_ARCHITECTURE_PLAN.md)
+- Commands, training smoke run, calibration and evaluation: [`docs/RHEN2_QUICKSTART.md`](docs/RHEN2_QUICKSTART.md)
+
+---
+
 ## Agent Framework Integrations
 
 RHEN is designed as a drop-in deterministic decision engine for popular agentic frameworks, replacing brittle prompt-based JSON tool callers with typed, calibrated, non-autoregressive decision layers. Complete executable implementations are provided in [`examples/07_agent_framework_integrations.py`](examples/07_agent_framework_integrations.py).
@@ -805,6 +865,10 @@ Key verified properties:
 - **Checkpoint loading trusts the file.** `rhen/research/checkpointing.py` loads the RNG state files (`rng_rank*.pt`) with `torch.load(..., weights_only=False)`, which can execute code embedded in a crafted file. Optimizer and model files load with `weights_only=True`. Load checkpoints only from a trusted source.
 - **Known structural limits of the v1 decision path.** The state is not bidirectional in odd layers (sliding window), answers depend on question order and leak across branches through the slot channel, and option order matters unless option isolation is enabled. Four `xfail` tests in `tests/test_v1_known_structural_issues.py` document this. The `rhen.v2` package (see `docs/RHEN2_ARCHITECTURE_PLAN.md`) provides these properties by construction.
 - **Large flat configuration.** `RhenConfig` (an alias of `EOSConfig` in `rhen/config.py`) takes 128 named keyword parameters, plus `**kwargs`. Check parameter names against the source before use.
+- **RHEN-2 has no trained checkpoint.** `rhen.v2` has no committed weights, so no RHEN-2 accuracy, calibration, latency or comparison figure exists. Its tests check mechanics only.
+- **RHEN-2 has no measured accuracy or calibration.** The evaluation suite and ablation scripts run, but no result from a trained model is committed. Untrained runs say nothing about the design.
+- **The flat-encoder ablation has not been run.** Plan section 10.4 item 7 compares the workspace with a flat encoder at matched compute. That test of the central design claim is not implemented in `benchmarks/suite/run_ablations.py`, so the design claim is unverified.
+- **Critical-tier exact evidence masking is not implemented.** The Checker's exact evidence test, which masks input tokens and re-runs the state encoder, is not implemented. Evidence spans come from attention and are not verified exactly at the critical tier.
 
 ---
 
