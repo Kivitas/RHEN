@@ -104,7 +104,10 @@ batches = [packer.pack(chunk) for chunk in make_batches(examples, max_questions=
 
 records = collect_records(model, batches)
 cal = fit_calibration(records, model_hash=weights_hash(model))
-cal.save("calibration.json")
+import os
+CAL_PATH = "runs/demo/calibration.json"   # runs/ is git-ignored; never commit a demo calibration
+os.makedirs("runs/demo", exist_ok=True)
+cal.save(CAL_PATH)
 print("calibrated:", cal.calibrated)
 ```
 
@@ -132,7 +135,7 @@ The pipeline runs these stages in order: ingest, plan, encode, deliberate, calib
 With a calibration object, pass it to the constructor:
 
 ```python
-pipe = DecisionPipeline(model, packer, calibration=Calibration.load("calibration.json"))
+pipe = DecisionPipeline(model, packer, calibration=Calibration.load(CAL_PATH))
 ```
 
 An untrained model never stages and `execute` refuses its decisions, whatever the calibration. Load a trained checkpoint and set `training_run_id` before any action can be staged.
